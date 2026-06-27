@@ -22,6 +22,9 @@ export async function GET(
       messages: conv.messages.map((m) => ({
         ...m,
         toolCalls: m.toolCalls ? JSON.parse(m.toolCalls) : undefined,
+        // Restore thinking events (reasoning trace + tool calls) so they
+        // survive page reload and chat switching.
+        thinking: m.thinking ? JSON.parse(m.thinking) : undefined,
         createdAt: m.createdAt.toISOString(),
       })),
       updatedAt: conv.updatedAt.toISOString(),

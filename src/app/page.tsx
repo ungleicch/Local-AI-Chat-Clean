@@ -32,6 +32,7 @@ export default function Home() {
     setStreaming,
     addThinkingEvent,
     updateThinkingEvent,
+    appendToThinkingEvent,
   } = useChat();
 
   const { providers, models, chat: chatSettings, theme } = useSettings();
@@ -359,6 +360,10 @@ export default function Home() {
       const pendingToolCalls: ChatMessage["toolCalls"] = [];
       // Track active tool call events for status updates
       const activeToolEvents = new Map<string, string>(); // toolCallId -> eventId
+      // Stable ID for the streaming thinking event — all thinking chunks
+      // for this response append to the same event.
+      const thinkingEventId = `thinking-${assistantId}`;
+      let thinkingEventCreated = false;
 
       try {
         const resp = await fetch("/api/chat", {
@@ -410,6 +415,24 @@ export default function Home() {
             }
             if (eventType === "text" && payload.content) {
               appendToMessage(conversationId, assistantId, payload.content);
+            } else if (eventType === "thinking" && payload.content) {
+              // Reasoning content — append directly to the thinking indicator.
+              // This NEVER touches message.content, so thinking text never
+              // appears in the main response area.
+              if (!thinkingEventCreated) {
+                // Create the thinking event on first chunk
+                addThinkingEvent(conversationId, assistantId, {
+                  id: thinkingEventId,
+                  type: "thinking",
+                  content: payload.content,
+                  timestamp: new Date().toISOString(),
+                  status: "active",
+                });
+                thinkingEventCreated = true;
+              } else {
+                // Append to existing thinking event
+                appendToThinkingEvent(conversationId, assistantId, thinkingEventId, payload.content);
+              }
             } else if (eventType === "tool_call" && payload.toolCall) {
               pendingToolCalls?.push(payload.toolCall);
               updateMessage(conversationId, assistantId, {
@@ -484,6 +507,7 @@ export default function Home() {
       updateMessage,
       addThinkingEvent,
       updateThinkingEvent,
+      appendToThinkingEvent,
       setMessages,
       setCurrent,
       upsertConversation,
