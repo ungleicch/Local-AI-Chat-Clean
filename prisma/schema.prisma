@@ -1,0 +1,168 @@
+// Prisma schema for local AI chat platform with memory, soul file, virtual envs
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Conversation {
+  id          String    @id @default(cuid())
+  title       String    @default("New chat")
+  providerId  String?
+  modelId     String?
+  systemPrompt String?
+  pinned      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  messages    Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  role           String       // user | assistant | system | tool
+  content        String
+  toolCalls      String?      // JSON array of tool calls
+  toolCallId     String?
+  toolName       String?
+  attachments    String?      // JSON array of uploaded file IDs
+  status         String       @default("complete")
+  tokens         Int          @default(0)
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+}
+
+model Provider {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // openai | anthropic | glm | ollama | lmstudio | custom
+  baseUrl     String
+  apiKey      String?
+  enabled     Boolean  @default(true)
+  isLocal     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  models      Model[]
+}
+
+model Model {
+  id          String   @id @default(cuid())
+  providerId  String
+  name        String
+  displayName String
+  contextWindow Int    @default(8192)
+  supportsTools Boolean @default(true)
+  supportsVision Boolean @default(false)
+  enabled     Boolean  @default(true)
+  provider    Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+}
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
+
+// ---------- New: Memory & Soul ----------
+
+// Facts the agent has learned about the user (name, preferences, projects, etc.)
+model UserProfile {
+  id        String   @id @default(cuid())
+  key       String   // e.g. "name", "preferred_language", "current_project"
+  value     String
+  source    String?  // conversationId where it was learned
+  confidence Float  @default(1.0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([key])
+}
+
+// Agent's self-modifiable personality prompt
+model SoulFile {
+  id        String   @id @default(cuid())
+  content   String
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt
+}
+
+// Extracted knowledge entries (general facts, not user-specific)
+model KnowledgeEntry {
+  id             String   @id @default(cuid())
+  content        String
+  tags           String?  // comma-separated
+  source         String?  // conversationId
+  conversationId String?
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+}
+
+// Tools the agent has created for itself
+model CustomTool {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String
+  parameters  String   // JSON schema
+  code        String   // JS function body
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Virtual environments (isolated working directories)
+model VirtualEnv {
+  id        String   @id @default(cuid())
+  name      String
+  path      String   // filesystem path
+  status    String   @default("active") // active | killed
+  createdAt DateTime @default(now())
+}
+
+// File backups before agent modifications (until user accepts)
+model FileBackup {
+  id          String   @id @default(cuid())
+  originalPath String
+  backupPath  String
+  accepted    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+// Uploaded files with extracted text
+model UploadedFile {
+  id            String   @id @default(cuid())
+  filename      String
+  mimeType      String
+  size          Int
+  storagePath   String
+  extractedText String?
+  extracted     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+}
+
+// Favorite models (starred by user)
+model FavoriteModel {
+  id        String   @id @default(cuid())
+  modelKey  String   @unique // composite key: "providerId:modelName"
+  providerId String
+  modelName String
+  createdAt DateTime @default(now())
+}
+
+// Cached model lists from providers (refreshed every 24h)
+model ModelCache {
+  id           String   @id @default(cuid())
+  providerId   String   @unique
+  models       String   // JSON array of fetched models
+  fetchedAt    DateTime @default(now())
+
+  @@index([providerId])
+}
