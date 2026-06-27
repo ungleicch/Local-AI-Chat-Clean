@@ -48,6 +48,7 @@ export type ProviderType =
   | "glm"
   | "ollama"
   | "lmstudio"
+  | "openrouter"
   | "custom";
 
 export interface ProviderConfig {

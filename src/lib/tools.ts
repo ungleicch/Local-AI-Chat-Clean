@@ -10,6 +10,7 @@ import { envTools } from "./tools-env";
 import { systemTools, loadCustomTools } from "./tools-system";
 import { fileTools } from "./tools-files";
 import { imageTools } from "./tools-image";
+import { streamTools } from "./tools-stream";
 
 export interface ToolExecutor {
   definition: ToolDefinition;
@@ -403,7 +404,9 @@ const getToolsDefinition: ToolDefinition = {
 };
 
 // ---------- Registry ----------
-// Merge built-in tools with all the new tool categories
+// Merge built-in tools with all the new tool categories.
+// streamTools is last so its generate_image overrides the one in imageTools
+// (the stream version returns injectable markdown instead of instructions).
 export const toolRegistry: Record<string, ToolExecutor> = {
   web_search: webSearch,
   web_fetch: webFetch,
@@ -417,6 +420,7 @@ export const toolRegistry: Record<string, ToolExecutor> = {
   ...systemTools,
   ...fileTools,
   ...imageTools,
+  ...streamTools,
 };
 
 // Cached custom tools (loaded fresh per request in loadAllTools)

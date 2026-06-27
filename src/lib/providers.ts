@@ -445,6 +445,7 @@ export const adapters: Record<string, ProviderAdapter> = {
   glm: openAIAdapter,
   ollama: openAIAdapter,
   lmstudio: openAIAdapter,
+  openrouter: openAIAdapter,
   custom: openAIAdapter,
   anthropic: anthropicAdapter,
 };

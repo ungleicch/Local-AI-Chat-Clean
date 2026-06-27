@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Seed default providers (only if none exist).
-// Pre-populates: OpenAI, Anthropic, GLM, Ollama (local), LM Studio (local)
+// Pre-populates: OpenAI, Anthropic, GLM, OpenRouter, Ollama (local), LM Studio (local)
 // For local providers, immediately probes for available models.
 export async function POST() {
   const existing = await db.provider.count();
@@ -50,6 +50,16 @@ export async function POST() {
         { name: "glm-4-long", displayName: "GLM-4-Long", contextWindow: 1000000 },
         { name: "glm-4-flash", displayName: "GLM-4-Flash", contextWindow: 128000 },
       ],
+    },
+    {
+      name: "OpenRouter",
+      type: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      isLocal: false,
+      // No seed models — OpenRouter's catalog is huge and changes frequently.
+      // The user adds an API key in Settings, then clicks "Refresh models" to
+      // fetch the live list from https://openrouter.ai/api/v1/models.
+      seedModels: [],
     },
     {
       name: "Ollama (Local)",

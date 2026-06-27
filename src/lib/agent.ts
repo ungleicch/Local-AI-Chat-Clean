@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import { getAdapter } from "./providers";
 import { executeTool, getToolDefinitions, refreshCustomTools } from "./tools";
+import { STREAM_INJECT_TOOLS } from "./tools-stream";
 import { db } from "./db";
 
 export interface AgentLoopOptions {
@@ -82,21 +83,12 @@ async function buildDynamicSystemPrompt(basePrompt?: string): Promise<string> {
     "• You can evolve your own personality with update_soul (request via get_tools).\n" +
     "• Be concise. Think step by step. Always explain what you're doing briefly before calling tools.\n" +
     "\n" +
-    "=== AUTONOMY & SELF-RECOVERY (CRITICAL) ===\n" +
-    "• NEVER ask the user 'what would you like me to do?' or present a numbered list of options for them to pick from. You are an autonomous agent — decide for yourself and act.\n" +
-    "• If you encounter a problem (tool not found, command failed, file missing, API error, ambiguous request), DO NOT ask the user for help. Instead:\n" +
-    "    1. Think briefly about what went wrong.\n" +
-    "    2. Try an alternative approach (different tool, different arguments, different path).\n" +
-    "    3. If that also fails, try a third approach.\n" +
-    "    4. Only after 2-3 genuine attempts, give the user a brief status update of what you tried and what the final result was — NOT a question asking them what to do next.\n" +
-    "• If a tool call returns an error, read the error, adjust your approach, and try again immediately in the next step. Do not stop and ask.\n" +
-    "• If you're unsure what the user wants, make your best guess based on context and proceed with it. State your assumption in one sentence, then act. The user will correct you if needed — but they should almost never need to, because you should be able to infer intent from the request.\n" +
-    "• The ONLY times you may ask the user a question are:\n" +
-    "    - The request is genuinely impossible without a missing credential, file, or permission you cannot obtain any other way.\n" +
-    "    - The request is dangerous/destructive (deleting important data, running risky system commands) and you need explicit confirmation before proceeding.\n" +
-    "    - You have tried 3 different approaches and all failed, and you need a piece of information that only the user can provide.\n" +
-    "• Even in those cases, prefer stating 'I tried X, Y, Z. I need [specific thing] to continue.' over 'What should I do?'\n" +
-    "• When you complete a task, give the result directly. Do not follow up with 'Is there anything else you'd like me to help with?' — just end your response after delivering the answer."
+    "=== RICH CONTENT TOOLS (always available — no need to request via get_tools) ===\n" +
+    "• **create_table** — Call this to create a formatted table in your response. Provide 'headers' (array of column names) and 'rows' (array of row arrays). The table is injected into your response INSTANTLY — you do NOT need to write the markdown yourself. Example: call create_table with headers=[\"Name\",\"Score\"], rows=[[\"Alice\",\"95\"],[\"Bob\",\"87\"]] and the table appears immediately.\n" +
+    "• **embed_image** — Call this to embed an existing image (by URL or file_id) into your response. The image appears INSTANTLY. Use this to show images the user uploaded, images you generated earlier, or public image URLs.\n" +
+    "• **generate_image** — Call this to generate a new AI image from a text prompt and inject it into your response. The image appears INSTANTLY after generation. You do NOT need to write any markdown — it's handled for you.\n" +
+    "• When you call these tools, the content is added to your response automatically. Do NOT repeat the table/image markdown in your next message — just continue with any additional commentary or explanation.\n" +
+    "• These tools make your responses richer and more visual. Use them whenever the user's request would benefit from a table or image — don't just describe data in text when you can show it."
   );
 
   return parts.join("\n\n");
@@ -114,9 +106,18 @@ export async function* runAgentLoop(
   // Build dynamic system prompt with soul + memory
   const dynamicSystemPrompt = await buildDynamicSystemPrompt(opts.systemPrompt);
 
-  // Only web_search is always bound. Other tools must be requested via get_tools.
+  // Tools currently available to the model — starts with the always-bound set.
+  // Stream-injectable tools (create_table, embed_image, generate_image) are
+  // always available so the model can produce rich content immediately without
+  // needing to request them via get_tools first.
   const allToolDefs = getToolDefinitions(undefined); // all tools
-  const alwaysBoundToolNames = new Set(["web_search", "get_tools"]);
+  const alwaysBoundToolNames = new Set([
+    "web_search",
+    "get_tools",
+    "create_table",
+    "embed_image",
+    "generate_image",
+  ]);
 
   // Tools currently available to the model — starts with just web_search + get_tools
   let availableTools: ToolDefinition[] = opts.modelSupportsTools
@@ -247,6 +248,8 @@ export async function* runAgentLoop(
           extract_file: ["extract file", "pdf", "image text", "ocr", "document"],
           list_uploaded_files: ["uploaded files", "attachments"],
           generate_image: ["generate image", "create image", "picture", "draw", "image"],
+          create_table: ["table", "tabular", "grid", "spreadsheet", "columns and rows"],
+          embed_image: ["embed image", "show image", "display image", "insert image", "picture in response"],
         };
         const matchedToolNames = new Set<string>();
         for (const [toolName, keywords] of Object.entries(toolKeywords)) {
@@ -309,6 +312,22 @@ export async function* runAgentLoop(
           }
         ),
       };
+
+      // Stream-injectable tools: their result IS markdown content (tables,
+      // images) that should appear in the response stream immediately —
+      // without waiting for the model to re-generate it in the next step.
+      // We yield the result content as a text chunk so it flows into the
+      // response instantly, then yield the tool_result for the thinking
+      // indicator, and tell the model not to repeat the content.
+      if (STREAM_INJECT_TOOLS.has(tc.name) && !result.content.startsWith("Error:")) {
+        // Inject the markdown into the stream as text
+        yield { type: "text", content: "\n\n" + result.content + "\n\n" };
+        // Override the tool result message so the model knows it's already injected
+        result.content =
+          `[ALREADY INJECTED INTO YOUR RESPONSE — do not repeat this markdown:]\n${result.content}\n[END INJECTED CONTENT]\n` +
+          `The above content has been added to your response. Continue with any additional commentary or explanation. Do NOT repeat the table/image markdown.`;
+      }
+
       yield { type: "tool_result", toolResult: result };
       messages.push({
         id: `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

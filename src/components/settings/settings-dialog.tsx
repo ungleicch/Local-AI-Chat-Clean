@@ -409,6 +409,7 @@ function AddProviderForm({ onAdded }: { onAdded: () => void }) {
               <SelectItem value="openai">OpenAI-compatible</SelectItem>
               <SelectItem value="anthropic">Anthropic</SelectItem>
               <SelectItem value="glm">GLM (Z.ai)</SelectItem>
+              <SelectItem value="openrouter">OpenRouter</SelectItem>
               <SelectItem value="ollama">Ollama (local)</SelectItem>
               <SelectItem value="lmstudio">LM Studio (local)</SelectItem>
               <SelectItem value="custom">Custom</SelectItem>
