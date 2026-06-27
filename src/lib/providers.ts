@@ -25,9 +25,34 @@ export interface ProviderAdapter {
 }
 
 // ---------- OpenAI-compatible adapter (OpenAI, GLM, local OpenAI servers, LM Studio) ----------
+
+// Normalize a provider base URL so that it ends with `/v1`.
+//
+// Handles the common variations users type:
+//   http://localhost:1234          → http://localhost:1234/v1
+//   http://localhost:1234/         → http://localhost:1234/v1
+//   http://localhost:1234/v1       → http://localhost:1234/v1   (no-op)
+//   http://localhost:1234/v1/      → http://localhost:1234/v1
+//   https://api.openai.com         → https://api.openai.com/v1
+//   https://api.openai.com/v1      → https://api.openai.com/v1  (no-op)
+//   http://localhost:11434/api     → http://localhost:11434/api/v1  (Ollama OpenAI-compat path kept)
+//
+// Without this, a base URL like `http://localhost:1234` produces
+// `POST /chat/completions` which LM Studio does not route — it logs
+// "Unexpected endpoint or method (POST /chat/completions)" and returns
+// an empty 200, which the client sees as a successful but empty stream.
+function normalizeOpenAIBaseUrl(raw: string): string {
+  const base = raw.replace(/\/+$/, "");
+  // If the URL already ends with /v1 (or /vN for any digit), leave it alone.
+  if (/\/v\d+$/.test(base)) return base;
+  // Ollama exposes an OpenAI-compatible API under /api — keep that path.
+  if (/\/api$/.test(base)) return `${base}/v1`;
+  return `${base}/v1`;
+}
+
 const openAIAdapter: ProviderAdapter = {
   async *streamChat(req, provider, signal) {
-    const baseUrl = provider.baseUrl.replace(/\/$/, "");
+    const baseUrl = normalizeOpenAIBaseUrl(provider.baseUrl);
     const url = `${baseUrl}/chat/completions`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
