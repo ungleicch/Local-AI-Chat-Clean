@@ -58,7 +58,9 @@ export function MinimalComposer({
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+    // Match the CSS max-h-[400px] below — previous 160px cap made the
+    // textarea scroll far too early for long messages.
+    ta.style.height = Math.min(ta.scrollHeight, 400) + "px";
   }, [text]);
 
   const handleSend = () => {
@@ -70,6 +72,11 @@ export function MinimalComposer({
   };
 
   const handleKey = (e: React.KeyboardEvent) => {
+    // IME composition guard — without this, pressing Enter to confirm an
+    // in-progress CJK (Chinese/Japanese/Korean) composition also sends the
+    // message prematurely. `isComposing` is the modern flag; `keyCode === 229`
+    // is the legacy fallback still emitted by some browsers/IMEs.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();

@@ -132,6 +132,11 @@ export async function* runAgentLoop(
 
     let textBuffer = "";
     const toolCalls: ToolCall[] = [];
+    // Some adapters (notably LM Studio's REST adapter if it is ever used)
+    // execute tools server-side and return the result inline as a
+    // `tool_result` chunk. We collect these so we don't try to re-execute
+    // the same tool below.
+    const precomputedResults = new Map<string, ToolResult>();
 
     try {
       for await (const chunk of adapter.streamChat(
@@ -148,6 +153,10 @@ export async function* runAgentLoop(
           yield chunk;
         } else if (chunk.type === "tool_call" && chunk.toolCall) {
           toolCalls.push(chunk.toolCall);
+        } else if (chunk.type === "tool_result" && chunk.toolResult) {
+          // Adapter already executed this tool — record the result so we
+          // don't re-execute it below.
+          precomputedResults.set(chunk.toolResult.toolCallId, chunk.toolResult);
         } else if (chunk.type === "error") {
           yield chunk;
           return;
@@ -268,7 +277,10 @@ export async function* runAgentLoop(
       }
 
       yield { type: "tool_call", toolCall: tc };
-      const result: ToolResult = {
+      // If the adapter already executed this tool server-side, reuse its
+      // result instead of calling executeTool again.
+      const precomputed = precomputedResults.get(tc.id);
+      const result: ToolResult = precomputed ?? {
         toolCallId: tc.id,
         name: tc.name,
         content: await executeTool(

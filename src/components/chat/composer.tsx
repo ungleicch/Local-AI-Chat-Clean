@@ -42,6 +42,8 @@ export function Composer({
   };
 
   const handleKey = (e: React.KeyboardEvent) => {
+    // IME composition guard — see minimal-composer.tsx for rationale.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();

@@ -32,10 +32,14 @@ function detectCapabilities(modelName: string): {
     name.includes("haiku");
 
   // Most modern models support tools; exceptions:
+  // (Operator precedence made explicit with parentheses for clarity.)
   const noTools =
     name.includes("o1-mini") ||
-    name.includes("o1-preview") ||
-    name.includes("instruct") && !name.includes("tool");
+    name.includes("o1-preview");
+  // Note: previously `name.includes("instruct") && !name.includes("tool")`
+  // was used to mark instruct models as tool-incapable, but most modern
+  // instruct models (Llama-3.1-Instruct, Qwen2.5-Instruct, Mistral-Instruct,
+  // etc.) DO support tools. Removed to stop mislabeling them.
 
   const supportsTools = !noTools;
 
@@ -102,8 +106,14 @@ async function fetchModelsFromProvider(provider: {
   const headers: Record<string, string> = {};
   if (provider.apiKey) {
     headers["Authorization"] = `Bearer ${provider.apiKey}`;
-    headers["x-api-key"] = provider.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
+    // Anthropic-specific headers — only send them to Anthropic.
+    // Sending x-api-key / anthropic-version to OpenAI, Ollama, or LM Studio
+    // is at best ignored and at worst causes some servers to reject the
+    // request with a 400.
+    if (provider.type === "anthropic") {
+      headers["x-api-key"] = provider.apiKey;
+      headers["anthropic-version"] = "2023-06-01";
+    }
   }
 
   let models: Array<{ id?: string; name?: string }> = [];

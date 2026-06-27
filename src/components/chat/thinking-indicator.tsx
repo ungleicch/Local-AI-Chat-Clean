@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import type { ThinkingEvent } from "@/lib/types";
 import { useState } from "react";
-import { createElement } from "react";
 
 interface ThinkingIndicatorProps {
   events: ThinkingEvent[];

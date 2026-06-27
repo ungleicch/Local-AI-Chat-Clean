@@ -66,7 +66,7 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
           {/* Response streams in below the thinking section */}
           {(message.content || isAssistantThinking) && (
             <div className="mt-1">
-              <Markdown content={message.content || (isAssistantThinking ? "" : "")} />
+              <Markdown content={message.content || ""} />
               {isAssistantThinking && !message.content && (
                 <span className="inline-block h-3 w-1.5 animate-pulse rounded-sm bg-foreground/40 align-middle ml-0.5" />
               )}
