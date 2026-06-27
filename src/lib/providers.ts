@@ -149,6 +149,13 @@ async function* parseOpenAIStream(
     number,
     { id: string; name: string; args: string }
   >();
+  // State for parsing <think>...</think> tags from delta.content.
+  // Many models (Gemma, DeepSeek, QwQ) emit reasoning as <think> tags
+  // INSIDE delta.content rather than as delta.reasoning_content.
+  // We parse these out and yield them as 'thinking' chunks so they go
+  // directly to the thinking indicator, not the response text.
+  let thinkBuffer = "";      // accumulates text to scan for <think> tags
+  let insideThink = false;   // whether we're currently inside a <think> block
 
   try {
     while (true) {
@@ -162,6 +169,16 @@ async function* parseOpenAIStream(
         if (!trimmed || !trimmed.startsWith("data:")) continue;
         const data = trimmed.slice(5).trim();
         if (data === "[DONE]") {
+          // Flush any remaining thinkBuffer content
+          if (thinkBuffer) {
+            if (insideThink) {
+              yield { type: "thinking", content: thinkBuffer };
+            } else {
+              yield { type: "text", content: thinkBuffer };
+            }
+            thinkBuffer = "";
+            insideThink = false;
+          }
           // Flush any complete tool calls
           for (const [, tc] of toolCallAccumulators) {
             if (tc.name) {
@@ -185,15 +202,66 @@ async function* parseOpenAIStream(
           const delta = json.choices?.[0]?.delta;
           if (!delta) continue;
 
-          // Normal text content
+          // Normal text content — parse out <think>...</think> tags.
+          // Many models emit reasoning as <think> tags inside delta.content
+          // instead of using delta.reasoning_content. We split these out:
+          // text outside <think> tags → 'text' chunks
+          // text inside <think> tags → 'thinking' chunks
           if (typeof delta.content === "string" && delta.content) {
-            yield { type: "text", content: delta.content };
+            thinkBuffer += delta.content;
+            // Process the buffer, extracting complete <think> blocks and
+            // yielding text/thinking chunks. We only yield text that we're
+            // sure is NOT inside a <think> block.
+            while (thinkBuffer.length > 0) {
+              if (!insideThink) {
+                // Look for opening <think> tag
+                const openIdx = thinkBuffer.indexOf("<think>");
+                if (openIdx === -1) {
+                  // No <think> tag found. But we might be in the middle of
+                  // one (e.g. "<thi" so far). Hold back the last few chars
+                  // to avoid splitting a partial tag, yield the rest as text.
+                  if (thinkBuffer.length > 7) {
+                    const safe = thinkBuffer.slice(0, thinkBuffer.length - 7);
+                    thinkBuffer = thinkBuffer.slice(thinkBuffer.length - 7);
+                    if (safe) yield { type: "text", content: safe };
+                  }
+                  break;
+                } else {
+                  // Yield text before <think> as a text chunk
+                  if (openIdx > 0) {
+                    yield { type: "text", content: thinkBuffer.slice(0, openIdx) };
+                  }
+                  thinkBuffer = thinkBuffer.slice(openIdx + 7); // skip "<think>"
+                  insideThink = true;
+                }
+              } else {
+                // Inside <think> block — look for closing </think> tag
+                const closeIdx = thinkBuffer.indexOf("</think>");
+                if (closeIdx === -1) {
+                  // No closing tag yet. Yield everything as thinking, but
+                  // hold back 8 chars in case "</think>" is split across chunks.
+                  if (thinkBuffer.length > 8) {
+                    const safe = thinkBuffer.slice(0, thinkBuffer.length - 8);
+                    thinkBuffer = thinkBuffer.slice(thinkBuffer.length - 8);
+                    if (safe) yield { type: "thinking", content: safe };
+                  }
+                  break;
+                } else {
+                  // Yield thinking content before </think>
+                  if (closeIdx > 0) {
+                    yield { type: "thinking", content: thinkBuffer.slice(0, closeIdx) };
+                  }
+                  thinkBuffer = thinkBuffer.slice(closeIdx + 8); // skip "</think>"
+                  insideThink = false;
+                }
+              }
+            }
           }
 
-          // Reasoning content — yield as a separate `thinking` chunk so it
-          // goes directly to the thinking indicator, NOT into the response
-          // text. (DeepSeek-R1, QwQ, and other reasoning models served via
-          // LM Studio's OpenAI-compatible endpoint emit this field.)
+          // Reasoning content (delta.reasoning_content) — yield as thinking.
+          // This is a separate field used by DeepSeek API and some LM Studio
+          // models. Models that emit <think> tags in delta.content are handled
+          // by the parser above.
           if (
             typeof delta.reasoning_content === "string" &&
             delta.reasoning_content
@@ -224,7 +292,14 @@ async function* parseOpenAIStream(
   } finally {
     reader.releaseLock();
   }
-  // Stream ended without [DONE] — flush tool calls.
+  // Stream ended without [DONE] — flush remaining thinkBuffer + tool calls.
+  if (thinkBuffer) {
+    if (insideThink) {
+      yield { type: "thinking", content: thinkBuffer };
+    } else {
+      yield { type: "text", content: thinkBuffer };
+    }
+  }
   for (const [, tc] of toolCallAccumulators) {
     if (tc.name) {
       let parsedArgs: Record<string, unknown> = {};

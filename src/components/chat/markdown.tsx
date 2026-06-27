@@ -1,9 +1,10 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { useState, Fragment } from "react";
+import React, { useState, Fragment } from "react";
 import { Check, Copy, Brain, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BlockMath, InlineMath } from "react-katex";
@@ -114,6 +115,9 @@ function extractFinalAnswer(block: string): string | null {
  * `<TextWithMath>` element. This is the reliable way to get inline math
  * (`$...$`) and display math (`$$...$$`) rendering under react-markdown v10,
  * which silently ignores a `text` key in the `components` map.
+ *
+ * Recurses into nested elements (e.g. <strong> inside <td>) so math inside
+ * formatted table cells renders correctly.
  */
 function renderChildrenWithMath(children: ReactNode): ReactNode {
   if (typeof children === "string") {
@@ -124,7 +128,21 @@ function renderChildrenWithMath(children: ReactNode): ReactNode {
       if (typeof child === "string") {
         return <TextWithMath key={i} text={child} />;
       }
+      // Recurse into React elements (e.g. <strong>, <em>, <code>)
+      if (child && typeof child === "object" && "props" in child) {
+        const el = child as React.ReactElement<{ children?: ReactNode }>;
+        return React.cloneElement(el, {
+          children: renderChildrenWithMath(el.props.children),
+        });
+      }
       return child;
+    });
+  }
+  // Single React element — recurse into its children
+  if (children && typeof children === "object" && "props" in children) {
+    const el = children as React.ReactElement<{ children?: ReactNode }>;
+    return React.cloneElement(el, {
+      children: renderChildrenWithMath(el.props.children),
     });
   }
   return children;
@@ -138,6 +156,7 @@ export function Markdown({ content, className }: MarkdownProps) {
       {thinkingBlocks.length > 0 && <ThinkingBlocks blocks={thinkingBlocks} />}
 
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
             <h1 className="text-xl font-semibold mt-4 mb-2 first:mt-0">
