@@ -8,7 +8,7 @@ import { MinimalComposer, type Attachment } from "@/components/chat/minimal-comp
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { useChat } from "@/lib/stores/chat";
 import { useSettings } from "@/lib/stores/settings";
-import type { ChatMessage, StreamChunk, ThinkingEvent } from "@/lib/types";
+import type { ChatMessage, StreamChunk, ThinkingEvent, ContentBlock } from "@/lib/types";
 import { v4 as uuid } from "uuid";
 import { useToast } from "@/hooks/use-toast";
 import { useScrollSnapChat } from "@/hooks/use-scroll-snap-chat";
@@ -33,6 +33,7 @@ export default function Home() {
     addThinkingEvent,
     updateThinkingEvent,
     appendToThinkingEvent,
+    setBlocks,
   } = useChat();
 
   const { providers, models, chat: chatSettings, theme } = useSettings();
@@ -201,6 +202,11 @@ export default function Home() {
               toolCalls: m.toolCalls,
               toolCallId: m.toolCallId || undefined,
               toolName: m.toolName || undefined,
+              // Restore thinking events (reasoning trace + tool calls) so
+              // they survive page reload and chat switching.
+              thinking: m.thinking || undefined,
+              // Restore ordered content blocks for interleaved rendering.
+              blocks: m.blocks || undefined,
               status: m.status,
               createdAt: m.createdAt,
             }))
@@ -348,6 +354,7 @@ export default function Home() {
         status: "streaming",
         createdAt: new Date().toISOString(),
         thinking: [],
+        blocks: [],
       };
       addMessage(conversationId, assistantMsg);
 
@@ -364,6 +371,10 @@ export default function Home() {
       // for this response append to the same event.
       const thinkingEventId = `thinking-${assistantId}`;
       let thinkingEventCreated = false;
+      // Ordered content blocks for interleaved rendering during streaming.
+      // Text and tool calls appear in the order they occur.
+      const streamBlocks: ContentBlock[] = [];
+      let currentTextBlockIdx = -1;
 
       try {
         const resp = await fetch("/api/chat", {
@@ -415,12 +426,22 @@ export default function Home() {
             }
             if (eventType === "text" && payload.content) {
               appendToMessage(conversationId, assistantId, payload.content);
+              // Add to stream blocks (merge consecutive text)
+              if (currentTextBlockIdx >= 0 && streamBlocks[currentTextBlockIdx].type === "text") {
+                streamBlocks[currentTextBlockIdx].content =
+                  (streamBlocks[currentTextBlockIdx].content || "") + payload.content;
+              } else {
+                streamBlocks.push({
+                  type: "text",
+                  content: payload.content,
+                  timestamp: new Date().toISOString(),
+                });
+                currentTextBlockIdx = streamBlocks.length - 1;
+              }
+              setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "thinking" && payload.content) {
               // Reasoning content — append directly to the thinking indicator.
-              // This NEVER touches message.content, so thinking text never
-              // appears in the main response area.
               if (!thinkingEventCreated) {
-                // Create the thinking event on first chunk
                 addThinkingEvent(conversationId, assistantId, {
                   id: thinkingEventId,
                   type: "thinking",
@@ -430,9 +451,17 @@ export default function Home() {
                 });
                 thinkingEventCreated = true;
               } else {
-                // Append to existing thinking event
                 appendToThinkingEvent(conversationId, assistantId, thinkingEventId, payload.content);
               }
+              // Add as a thinking block (interleaved)
+              streamBlocks.push({
+                type: "thinking",
+                content: payload.content,
+                timestamp: new Date().toISOString(),
+                status: "active",
+              });
+              currentTextBlockIdx = -1;
+              setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "tool_call" && payload.toolCall) {
               pendingToolCalls?.push(payload.toolCall);
               updateMessage(conversationId, assistantId, {
@@ -450,8 +479,17 @@ export default function Home() {
                 status: "active",
               };
               addThinkingEvent(conversationId, assistantId, thinkingEvent);
+              // Add as a tool_call block (interleaved with text)
+              streamBlocks.push({
+                type: "tool_call",
+                toolCall: payload.toolCall,
+                timestamp: new Date().toISOString(),
+                status: "active",
+              });
+              currentTextBlockIdx = -1;
+              setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "tool_result" && payload.toolResult) {
-              // Update the corresponding tool_call event to "complete" and add result
+              // Update the corresponding tool_call event to "complete"
               const eventId = activeToolEvents.get(payload.toolResult.toolCallId);
               if (eventId) {
                 updateThinkingEvent(conversationId, assistantId, eventId, {
@@ -468,6 +506,15 @@ export default function Home() {
                 status: "complete",
               };
               addThinkingEvent(conversationId, assistantId, resultEvent);
+              // Add as a tool_result block (interleaved)
+              streamBlocks.push({
+                type: "tool_result",
+                toolResult: payload.toolResult,
+                timestamp: new Date().toISOString(),
+                status: "complete",
+              });
+              currentTextBlockIdx = -1;
+              setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "error" && payload.error) {
               setError(payload.error);
             } else if (eventType === "done") {
@@ -508,6 +555,7 @@ export default function Home() {
       addThinkingEvent,
       updateThinkingEvent,
       appendToThinkingEvent,
+      setBlocks,
       setMessages,
       setCurrent,
       upsertConversation,

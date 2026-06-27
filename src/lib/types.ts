@@ -13,6 +13,8 @@ export interface ChatMessage {
   createdAt: string;
   // Thinking/reasoning trace events for this assistant message
   thinking?: ThinkingEvent[];
+  // Ordered content blocks for interleaved rendering (text + tool calls)
+  blocks?: ContentBlock[];
 }
 
 export interface ThinkingEvent {
@@ -98,4 +100,17 @@ export interface StreamChunk {
   toolResult?: ToolResult;
   error?: string;
   step?: string;
+}
+
+/**
+ * An ordered content block for interleaved rendering of text + tool calls.
+ * Stored in the Message.blocks column as a JSON array.
+ */
+export interface ContentBlock {
+  type: "text" | "tool_call" | "tool_result" | "thinking";
+  content?: string;       // for text/thinking blocks
+  toolCall?: ToolCall;    // for tool_call blocks
+  toolResult?: ToolResult; // for tool_result blocks
+  timestamp: string;
+  status?: "active" | "complete" | "error";
 }

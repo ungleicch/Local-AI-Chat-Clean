@@ -2,8 +2,9 @@
 
 import { Markdown } from "./markdown";
 import { ThinkingIndicator } from "./thinking-indicator";
+import { ToolCallRow, ToolResultRow, ThinkingRow } from "./block-rows";
 import { cn } from "@/lib/utils";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, ContentBlock } from "@/lib/types";
 import { motion } from "framer-motion";
 import { useChat } from "@/lib/stores/chat";
 
@@ -21,12 +22,12 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
   const isExpanded = expandedThinking[message.id] || false;
   const hasThinking = (message.thinking?.length || 0) > 0;
   const isAssistantThinking = isStreaming && isLast && message.role === "assistant";
+  const hasBlocks = (message.blocks?.length || 0) > 0;
 
   // Tool result messages are absorbed into the thinking indicator
   if (isTool) return null;
 
   if (isUser) {
-    // User message — same grey background as input bar, positioned where input bar was
     return (
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -43,7 +44,30 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
     );
   }
 
-  // Assistant message
+  // Assistant message — if we have ordered content blocks, render them
+  // interleaved (text + tool calls in the order they occurred).
+  // Otherwise fall back to the old layout (thinking indicator + content).
+  if (hasBlocks) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
+        className="w-full px-4 py-2"
+      >
+        <div className="mx-auto max-w-3xl">
+          <div className="text-sm">
+            <BlocksRenderer
+              blocks={message.blocks!}
+              isStreaming={isAssistantThinking || false}
+            />
+          </div>
+        </div>
+      </motion.div>
+    );
+  }
+
+  // Fallback: old layout (thinking indicator above content)
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -53,7 +77,6 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
     >
       <div className="mx-auto max-w-3xl">
         <div className="text-sm">
-          {/* Thinking indicator (if there are thinking events or currently thinking) */}
           {(hasThinking || isAssistantThinking) && (
             <ThinkingIndicator
               events={message.thinking || []}
@@ -63,7 +86,6 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
             />
           )}
 
-          {/* Response streams in below the thinking section */}
           {(message.content || isAssistantThinking) && (
             <div className="mt-1">
               <Markdown content={message.content || ""} />
@@ -75,5 +97,49 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
         </div>
       </div>
     </motion.div>
+  );
+}
+
+/**
+ * Renders ordered content blocks — text, tool calls, tool results, and
+ * thinking — in the order they occurred. This makes tool calls appear
+ * BETWEEN text statements instead of all grouped at the top.
+ */
+function BlocksRenderer({
+  blocks,
+  isStreaming,
+}: {
+  blocks: ContentBlock[];
+  isStreaming: boolean;
+}) {
+  // Group consecutive thinking blocks into a collapsible section.
+  // Text, tool_call, and tool_result blocks render inline in order.
+  const renderBlock = (block: ContentBlock, idx: number) => {
+    if (block.type === "text" && block.content) {
+      return (
+        <div key={idx} className="my-1">
+          <Markdown content={block.content} />
+        </div>
+      );
+    }
+    if (block.type === "thinking" && block.content) {
+      return <ThinkingRow key={idx} content={block.content} isStreaming={isStreaming} />;
+    }
+    if (block.type === "tool_call" && block.toolCall) {
+      return <ToolCallRow key={idx} toolCall={block.toolCall} status={block.status} />;
+    }
+    if (block.type === "tool_result" && block.toolResult) {
+      return <ToolResultRow key={idx} toolResult={block.toolResult} />;
+    }
+    return null;
+  };
+
+  return (
+    <>
+      {blocks.map((block, idx) => renderBlock(block, idx))}
+      {isStreaming && (
+        <span className="inline-block h-3 w-1.5 animate-pulse rounded-sm bg-foreground/40 align-middle ml-0.5" />
+      )}
+    </>
   );
 }

@@ -25,6 +25,8 @@ export async function GET(
         // Restore thinking events (reasoning trace + tool calls) so they
         // survive page reload and chat switching.
         thinking: m.thinking ? JSON.parse(m.thinking) : undefined,
+        // Restore ordered content blocks for interleaved rendering.
+        blocks: m.blocks ? JSON.parse(m.blocks) : undefined,
         createdAt: m.createdAt.toISOString(),
       })),
       updatedAt: conv.updatedAt.toISOString(),

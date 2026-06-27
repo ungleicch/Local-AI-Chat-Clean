@@ -30,6 +30,8 @@ model Message {
   toolCallId     String?
   toolName       String?
   attachments    String?      // JSON array of uploaded file IDs
+  thinking       String?      // JSON array of ThinkingEvent (reasoning trace + tool calls)
+  blocks         String?      // JSON array of ordered content blocks for interleaved rendering
   status         String       @default("complete")
   tokens         Int          @default(0)
   createdAt      DateTime     @default(now())

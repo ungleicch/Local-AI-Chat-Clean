@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { runAgentLoop } from "@/lib/agent";
+import type { ContentBlock } from "@/lib/types";
 import path from "node:path";
 import fs from "node:fs/promises";
 
@@ -119,6 +120,26 @@ export async function POST(req: NextRequest) {
           name: string;
           arguments: Record<string, unknown>;
         }> = [];
+        // Collect thinking events (reasoning trace + tool calls + tool results)
+        // so they can be persisted to the DB and restored on page reload.
+        const thinkingEvents: Array<{
+          id: string;
+          type: "thinking" | "tool_call" | "tool_result";
+          content?: string;
+          toolName?: string;
+          toolArgs?: Record<string, unknown>;
+          toolResult?: string;
+          timestamp: string;
+          status?: string;
+        }> = [];
+        // Stable ID for the streaming thinking event
+        let thinkingEventId: string | null = null;
+        // Ordered content blocks for interleaved rendering — text and tool
+        // calls appear in the order they occurred, not all grouped at top.
+        const contentBlocks: ContentBlock[] = [];
+        // Track the current text block (so consecutive text chunks merge
+        // into one block rather than creating many tiny blocks)
+        let currentTextBlockIdx = -1;
 
         for await (const chunk of runAgentLoop({
           providerId,
@@ -143,27 +164,98 @@ export async function POST(req: NextRequest) {
               if (chunk.content) {
                 assistantText += chunk.content;
                 send("text", { content: chunk.content });
+                // Add to content blocks — merge with previous text block
+                // if consecutive (avoids many tiny text blocks)
+                if (currentTextBlockIdx >= 0 && contentBlocks[currentTextBlockIdx].type === "text") {
+                  contentBlocks[currentTextBlockIdx].content =
+                    (contentBlocks[currentTextBlockIdx].content || "") + chunk.content;
+                } else {
+                  contentBlocks.push({
+                    type: "text",
+                    content: chunk.content,
+                    timestamp: new Date().toISOString(),
+                  });
+                  currentTextBlockIdx = contentBlocks.length - 1;
+                }
               }
               break;
             case "thinking":
               // Reasoning content — send as a separate SSE event type.
-              // The client routes this to the thinking indicator, NOT the
-              // response text. It never gets added to assistantText.
               if (chunk.content) {
                 send("thinking", { content: chunk.content });
+                // Add as a thinking block (always new — don't merge with text)
+                contentBlocks.push({
+                  type: "thinking",
+                  content: chunk.content,
+                  timestamp: new Date().toISOString(),
+                  status: "active",
+                });
+                currentTextBlockIdx = -1; // next text starts a new block
+                // Collect for persistence (thinking events array)
+                if (!thinkingEventId) {
+                  thinkingEventId = `thinking-${Date.now()}`;
+                  thinkingEvents.push({
+                    id: thinkingEventId,
+                    type: "thinking",
+                    content: chunk.content,
+                    timestamp: new Date().toISOString(),
+                    status: "active",
+                  });
+                } else {
+                  const evt = thinkingEvents.find((e) => e.id === thinkingEventId);
+                  if (evt) evt.content = (evt.content || "") + chunk.content;
+                }
               }
               break;
             case "tool_call":
               if (chunk.toolCall) {
                 toolCalls.push(chunk.toolCall);
                 send("tool_call", { toolCall: chunk.toolCall });
+                // Add as a tool_call block (interleaved with text)
+                contentBlocks.push({
+                  type: "tool_call",
+                  toolCall: chunk.toolCall,
+                  timestamp: new Date().toISOString(),
+                  status: "active",
+                });
+                currentTextBlockIdx = -1; // next text starts a new block
+                // Collect for persistence (thinking events array)
+                thinkingEvents.push({
+                  id: chunk.toolCall.id,
+                  type: "tool_call",
+                  toolName: chunk.toolCall.name,
+                  toolArgs: chunk.toolCall.arguments,
+                  timestamp: new Date().toISOString(),
+                  status: "active",
+                });
               }
               break;
             case "tool_result":
               if (chunk.toolResult) {
                 send("tool_result", { toolResult: chunk.toolResult });
+                // Add as a tool_result block
+                contentBlocks.push({
+                  type: "tool_result",
+                  toolResult: chunk.toolResult,
+                  timestamp: new Date().toISOString(),
+                  status: "complete",
+                });
+                currentTextBlockIdx = -1; // next text starts a new block
+                // Mark the corresponding tool_call event as complete
+                const callEvt = thinkingEvents.find(
+                  (e) => e.id === chunk.toolResult!.toolCallId && e.type === "tool_call"
+                );
+                if (callEvt) callEvt.status = "complete";
+                // Collect result event for persistence
+                thinkingEvents.push({
+                  id: `${chunk.toolResult.toolCallId}-result`,
+                  type: "tool_result",
+                  toolName: chunk.toolResult.name,
+                  toolResult: chunk.toolResult.content,
+                  timestamp: new Date().toISOString(),
+                  status: "complete",
+                });
                 if (persist) {
-                  // Persist tool result as a tool message
                   await db.message.create({
                     data: {
                       conversationId,
@@ -185,7 +277,7 @@ export async function POST(req: NextRequest) {
               break;
             case "done":
               if (persist) {
-                // Persist the assistant message
+                // Persist the assistant message with thinking events + blocks
                 await db.message.create({
                   data: {
                     conversationId,
@@ -193,6 +285,14 @@ export async function POST(req: NextRequest) {
                     content: assistantText,
                     toolCalls: toolCalls.length
                       ? JSON.stringify(toolCalls)
+                      : null,
+                    // Persist thinking events (reasoning trace + tool calls)
+                    thinking: thinkingEvents.length > 0
+                      ? JSON.stringify(thinkingEvents)
+                      : null,
+                    // Persist ordered content blocks for interleaved rendering
+                    blocks: contentBlocks.length > 0
+                      ? JSON.stringify(contentBlocks)
                       : null,
                     status: "complete",
                   },

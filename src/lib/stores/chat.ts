@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import type { ChatMessage, ThinkingEvent } from "@/lib/types";
+import type { ChatMessage, ThinkingEvent, ContentBlock } from "@/lib/types";
 
 interface Conversation {
   id: string;
@@ -34,6 +34,7 @@ interface ChatState {
   addThinkingEvent: (convId: string, msgId: string, event: ThinkingEvent) => void;
   updateThinkingEvent: (convId: string, msgId: string, eventId: string, patch: Partial<ThinkingEvent>) => void;
   appendToThinkingEvent: (convId: string, msgId: string, eventId: string, text: string) => void;
+  setBlocks: (convId: string, msgId: string, blocks: ContentBlock[]) => void;
   toggleThinking: (msgId: string) => void;
 }
 
@@ -135,6 +136,15 @@ export const useChat = create<ChatState>()((set) => ({
                 ),
               }
             : m
+        ),
+      },
+    })),
+  setBlocks: (convId, msgId, blocks) =>
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [convId]: (s.messages[convId] || []).map((m) =>
+          m.id === msgId ? { ...m, blocks } : m
         ),
       },
     })),
