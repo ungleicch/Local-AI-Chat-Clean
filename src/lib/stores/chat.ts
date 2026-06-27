@@ -33,6 +33,7 @@ interface ChatState {
   setStreaming: (s: boolean) => void;
   addThinkingEvent: (convId: string, msgId: string, event: ThinkingEvent) => void;
   updateThinkingEvent: (convId: string, msgId: string, eventId: string, patch: Partial<ThinkingEvent>) => void;
+  appendToThinkingEvent: (convId: string, msgId: string, eventId: string, text: string) => void;
   toggleThinking: (msgId: string) => void;
 }
 
@@ -113,6 +114,24 @@ export const useChat = create<ChatState>()((set) => ({
                 ...m,
                 thinking: (m.thinking || []).map((e) =>
                   e.id === eventId ? { ...e, ...patch } : e
+                ),
+              }
+            : m
+        ),
+      },
+    })),
+  appendToThinkingEvent: (convId, msgId, eventId, text) =>
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [convId]: (s.messages[convId] || []).map((m) =>
+          m.id === msgId
+            ? {
+                ...m,
+                thinking: (m.thinking || []).map((e) =>
+                  e.id === eventId
+                    ? { ...e, content: (e.content || "") + text }
+                    : e
                 ),
               }
             : m

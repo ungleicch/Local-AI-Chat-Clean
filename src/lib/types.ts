@@ -92,7 +92,7 @@ export interface ToolDefinition {
 }
 
 export interface StreamChunk {
-  type: "text" | "tool_call" | "tool_result" | "done" | "error" | "step";
+  type: "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "step";
   content?: string;
   toolCall?: ToolCall;
   toolResult?: ToolResult;

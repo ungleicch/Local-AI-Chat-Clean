@@ -172,6 +172,11 @@ export async function* runAgentLoop(
         if (chunk.type === "text" && chunk.content) {
           textBuffer += chunk.content;
           yield chunk;
+        } else if (chunk.type === "thinking" && chunk.content) {
+          // Reasoning content — pass through directly to the route handler.
+          // It gets sent as a separate SSE event type and routed to the
+          // thinking indicator, NOT the response text.
+          yield chunk;
         } else if (chunk.type === "tool_call" && chunk.toolCall) {
           toolCalls.push(chunk.toolCall);
         } else if (chunk.type === "tool_result" && chunk.toolResult) {

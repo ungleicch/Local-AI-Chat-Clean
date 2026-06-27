@@ -134,9 +134,11 @@ function buildOpenAIMessages(req: ChatRequest) {
 //                                     OpenAI-compatible servers exposing reasoning)
 //   - `delta.tool_calls`            — streamed tool-call function name + args
 //
-// Reasoning content is wrapped in `<think>...</think>` tags when yielded as
-// text so the markdown renderer can route it to the collapsible "Reasoning
-// trace" section instead of polluting the visible answer.
+// Reasoning content is yielded as a separate `thinking` chunk type so the
+// agent loop / chat route can route it directly to the thinking indicator —
+// it NEVER appears in the main response text. This avoids the janky UX of
+// thinking text flashing in the response area before being moved to the
+// thinking box.
 async function* parseOpenAIStream(
   body: ReadableStream<Uint8Array>
 ): AsyncGenerator<StreamChunk> {
@@ -147,7 +149,6 @@ async function* parseOpenAIStream(
     number,
     { id: string; name: string; args: string }
   >();
-  let inThinkBlock = false;
 
   try {
     while (true) {
@@ -161,11 +162,6 @@ async function* parseOpenAIStream(
         if (!trimmed || !trimmed.startsWith("data:")) continue;
         const data = trimmed.slice(5).trim();
         if (data === "[DONE]") {
-          // Close any still-open <think> block before flushing
-          if (inThinkBlock) {
-            yield { type: "text", content: "</think>" };
-            inThinkBlock = false;
-          }
           // Flush any complete tool calls
           for (const [, tc] of toolCallAccumulators) {
             if (tc.name) {
@@ -194,19 +190,15 @@ async function* parseOpenAIStream(
             yield { type: "text", content: delta.content };
           }
 
-          // Reasoning content — wrap in <think> tags so the markdown
-          // renderer routes it to the collapsible reasoning section.
-          // (DeepSeek-R1, QwQ, and other reasoning models served via
+          // Reasoning content — yield as a separate `thinking` chunk so it
+          // goes directly to the thinking indicator, NOT into the response
+          // text. (DeepSeek-R1, QwQ, and other reasoning models served via
           // LM Studio's OpenAI-compatible endpoint emit this field.)
           if (
             typeof delta.reasoning_content === "string" &&
             delta.reasoning_content
           ) {
-            if (!inThinkBlock) {
-              yield { type: "text", content: "<think>" };
-              inThinkBlock = true;
-            }
-            yield { type: "text", content: delta.reasoning_content };
+            yield { type: "thinking", content: delta.reasoning_content };
           }
 
           // Tool calls — accumulate function name + args, flush on [DONE]
@@ -232,10 +224,7 @@ async function* parseOpenAIStream(
   } finally {
     reader.releaseLock();
   }
-  // Stream ended without [DONE] — close think block + flush tool calls.
-  if (inThinkBlock) {
-    yield { type: "text", content: "</think>" };
-  }
+  // Stream ended without [DONE] — flush tool calls.
   for (const [, tc] of toolCallAccumulators) {
     if (tc.name) {
       let parsedArgs: Record<string, unknown> = {};

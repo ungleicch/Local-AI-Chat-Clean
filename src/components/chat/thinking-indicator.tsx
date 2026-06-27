@@ -131,6 +131,11 @@ export function ThinkingIndicator({
   const toolCallCount = events.filter((e) => e.type === "tool_call").length;
   const hasThinkingText = thinkingEvents.length > 0;
 
+  // Auto-expand the thinking section while streaming (so the user sees the
+  // reasoning trace flow in real-time). Once streaming completes, the user
+  // can collapse it manually.
+  const showThinkingExpanded = expanded || (isStreaming && hasThinkingText);
+
   return (
     <div className="flex flex-col gap-1.5 py-2">
       {/* --- Status header (spinner + summary) --- */}
@@ -195,8 +200,9 @@ export function ThinkingIndicator({
       ) : null}
 
       {/* --- Collapsible thinking text (reasoning) --- */}
+      {/* Auto-expanded while streaming so reasoning flows in real-time. */}
       <AnimatePresence>
-        {hasThinkingText && expanded && (
+        {hasThinkingText && showThinkingExpanded && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
@@ -228,7 +234,7 @@ function ThinkingEventRow({ event }: { event: ThinkingEvent }) {
 
   if (event.type === "thinking") {
     return (
-      <div className="text-xs text-muted-foreground/70 italic py-0.5">
+      <div className="text-xs text-muted-foreground/70 italic py-0.5 whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
         {event.content}
       </div>
     );

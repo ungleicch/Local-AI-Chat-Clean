@@ -54,3 +54,5 @@ server.log
 /skills/
 eval "$(ssh-agent -s)"
 eval "$(ssh-agent -s)".pub
+uploads
+workspace

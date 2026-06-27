@@ -214,9 +214,15 @@ export function Markdown({ content, className }: MarkdownProps) {
               {renderChildrenWithMath(children)}
             </td>
           ),
-          // Images — for AI-generated and uploaded images
+          // Images — for AI-generated and uploaded images.
+          // IMPORTANT: react-markdown wraps inline images in <p> tags, and
+          // <p> can only contain phrasing (inline) content. <figure> and
+          // <figcaption> are flow (block) elements and CANNOT be nested
+          // inside <p> — doing so causes a React hydration error.
+          // We use <span> with display:block via Tailwind classes instead.
+          // <span> is phrasing content, so it's valid inside <p>.
           img: ({ src, alt }) => (
-            <figure className="my-3">
+            <span className="my-3 block">
               <img
                 src={src}
                 alt={alt || ""}
@@ -224,11 +230,11 @@ export function Markdown({ content, className }: MarkdownProps) {
                 loading="lazy"
               />
               {alt && (
-                <figcaption className="mt-1.5 text-xs text-muted-foreground text-center">
+                <span className="mt-1.5 block text-xs text-muted-foreground text-center">
                   {alt}
-                </figcaption>
+                </span>
               )}
-            </figure>
+            </span>
           ),
           // Code blocks
           code({ className, children, ...props }) {

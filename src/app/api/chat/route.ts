@@ -145,6 +145,14 @@ export async function POST(req: NextRequest) {
                 send("text", { content: chunk.content });
               }
               break;
+            case "thinking":
+              // Reasoning content — send as a separate SSE event type.
+              // The client routes this to the thinking indicator, NOT the
+              // response text. It never gets added to assistantText.
+              if (chunk.content) {
+                send("thinking", { content: chunk.content });
+              }
+              break;
             case "tool_call":
               if (chunk.toolCall) {
                 toolCalls.push(chunk.toolCall);
