@@ -18,10 +18,16 @@ interface MarkdownProps {
 /**
  * Pre-process raw assistant content:
  *  1. Extract `<think>...</think>` blocks emitted by reasoning models
- *     (DeepSeek-R1, QwQ, etc.) so they don't render as raw text in the
- *     markdown body. They are returned separately and rendered as a
- *     collapsible "Reasoning" section above the answer.
+ *     (DeepSeek-R1, QwQ, Gemma fine-tunes, etc.) so they don't render as
+ *     raw text in the markdown body. They are returned separately and
+ *     rendered as a collapsible "Reasoning" section above the answer.
  *  2. Also handle an unclosed `<think>` tag (mid-stream snapshot).
+ *  3. CRITICAL FIX: if the model wraps its ENTIRE response in `<think>`
+ *     tags (common with Gemma fine-tunes served via LM Studio), the main
+ *     content would be empty after extraction — leaving a blank message
+ *     bubble. We detect this and surface the thinking block's "final
+ *     answer" (or the whole block if no marker is found) as the main
+ *     content so the user actually sees the response.
  */
 function preprocessContent(content: string): {
   content: string;
@@ -47,7 +53,60 @@ function preprocessContent(content: string): {
 
   // Tidy up leftover blank lines
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+
+  // CRITICAL FIX: if the model wrapped its entire response in <think> tags,
+  // the main content is now empty and the user would see a blank bubble.
+  // Many models (Gemma fine-tunes, DeepSeek-R1, QwQ) put their "final answer"
+  // at the end of the thinking block, often after a marker like:
+  //   "Final Output:" / "Final Answer:" / "Response:" / "Answer:" / "**Final**"
+  // We try to extract that. If no marker is found, we surface the last
+  // thinking block as the main content — the model clearly intended it as
+  // the answer, so hiding it in a collapsed section would be worse.
+  if (!cleaned && thinkingBlocks.length > 0) {
+    const lastBlock = thinkingBlocks[thinkingBlocks.length - 1];
+    const extracted = extractFinalAnswer(lastBlock);
+    if (extracted) {
+      // Use the extracted final answer as the main content, keep the full
+      // thinking block in the collapsible section for transparency.
+      cleaned = extracted;
+    } else {
+      // No explicit marker — surface the last thinking block as the answer.
+      // Remove it from thinkingBlocks so it's not duplicated.
+      thinkingBlocks.pop();
+      cleaned = lastBlock;
+    }
+  }
+
   return { content: cleaned, thinkingBlocks };
+}
+
+/**
+ * Try to extract a "final answer" from a thinking block. Many reasoning
+ * models emit a marker like "Final Output:", "Final Answer:", "Response:",
+ * or "Answer:" before the actual answer at the end of their thinking trace.
+ * Returns the extracted answer text, or null if no marker is found.
+ */
+function extractFinalAnswer(block: string): string | null {
+  // Common markers used by reasoning models to denote the final answer.
+  // Match case-insensitively, allow optional markdown bold (**), and
+  // require a colon or newline after the marker word.
+  const markers = [
+    /\*?\*?Final\s*Output\*?\*?\s*:/i,
+    /\*?\*?Final\s*Answer\*?\*?\s*:/i,
+    /\*?\*?Final\s*Response\*?\*?\s*:/i,
+    /\*?\*?Final\*?\*?\s*:/i,
+    /^\s*Response\s*:/im,
+    /^\s*Answer\s*:/im,
+    /^\s*Output\s*:/im,
+  ];
+  for (const marker of markers) {
+    const match = block.match(marker);
+    if (match && match.index !== undefined) {
+      const after = block.slice(match.index + match[0].length).trim();
+      if (after.length > 0) return after;
+    }
+  }
+  return null;
 }
 
 /**

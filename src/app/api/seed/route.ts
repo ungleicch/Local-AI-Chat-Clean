@@ -5,19 +5,21 @@ import { getProviderModels } from "@/lib/model-fetcher";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Seed default providers (only if none exist).
+// Seed default providers.
+//
+// IDEMPOTENT: upserts each provider by name. If a provider with the same name
+// already exists, it is left untouched (we don't overwrite the user's API key
+// or model list). Missing providers are added. This means re-running the seed
+// after adding new defaults (e.g. OpenRouter) will add the new ones without
+// wiping existing configuration.
+//
 // Pre-populates: OpenAI, Anthropic, GLM, OpenRouter, Ollama (local), LM Studio (local)
 // For local providers, immediately probes for available models.
 export async function POST() {
-  const existing = await db.provider.count();
-  if (existing > 0) {
-    return NextResponse.json({ seeded: false, message: "Providers already exist" });
-  }
-
   const seedProviders = [
     {
       name: "OpenAI",
-      type: "openai",
+      type: "openai" as const,
       baseUrl: "https://api.openai.com/v1",
       isLocal: false,
       seedModels: [
@@ -29,7 +31,7 @@ export async function POST() {
     },
     {
       name: "Anthropic",
-      type: "anthropic",
+      type: "anthropic" as const,
       baseUrl: "https://api.anthropic.com",
       isLocal: false,
       seedModels: [
@@ -40,7 +42,7 @@ export async function POST() {
     },
     {
       name: "Z.ai GLM",
-      type: "glm",
+      type: "glm" as const,
       baseUrl: "https://open.bigmodel.cn/api/paas/v4",
       isLocal: false,
       seedModels: [
@@ -53,7 +55,7 @@ export async function POST() {
     },
     {
       name: "OpenRouter",
-      type: "openrouter",
+      type: "openrouter" as const,
       baseUrl: "https://openrouter.ai/api/v1",
       isLocal: false,
       // No seed models — OpenRouter's catalog is huge and changes frequently.
@@ -63,21 +65,33 @@ export async function POST() {
     },
     {
       name: "Ollama (Local)",
-      type: "ollama",
+      type: "ollama" as const,
       baseUrl: "http://localhost:11434/v1",
       isLocal: true,
       seedModels: [],
     },
     {
       name: "LM Studio (Local)",
-      type: "lmstudio",
+      type: "lmstudio" as const,
       baseUrl: "http://localhost:1234/v1",
       isLocal: true,
       seedModels: [],
     },
   ];
 
+  // Build a set of existing provider names so we only insert missing ones.
+  const existing = await db.provider.findMany({ select: { name: true } });
+  const existingNames = new Set(existing.map((p) => p.name));
+
+  const added: string[] = [];
+  const skipped: string[] = [];
+
   for (const p of seedProviders) {
+    if (existingNames.has(p.name)) {
+      skipped.push(p.name);
+      continue;
+    }
+
     const created = await db.provider.create({
       data: {
         name: p.name,
@@ -91,6 +105,7 @@ export async function POST() {
           : undefined,
       },
     });
+    added.push(p.name);
 
     // For local providers, immediately probe for available models
     if (p.isLocal) {
@@ -102,5 +117,12 @@ export async function POST() {
     }
   }
 
-  return NextResponse.json({ seeded: true, count: seedProviders.length });
+  return NextResponse.json({
+    seeded: added.length > 0,
+    added,
+    skipped,
+    message: added.length > 0
+      ? `Added ${added.length} provider(s): ${added.join(", ")}`
+      : "All default providers already exist",
+  });
 }

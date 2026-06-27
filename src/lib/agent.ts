@@ -85,8 +85,12 @@ async function buildDynamicSystemPrompt(basePrompt?: string): Promise<string> {
     "\n" +
     "=== RICH CONTENT TOOLS (always available — no need to request via get_tools) ===\n" +
     "• **create_table** — Call this to create a formatted table in your response. Provide 'headers' (array of column names) and 'rows' (array of row arrays). The table is injected into your response INSTANTLY — you do NOT need to write the markdown yourself. Example: call create_table with headers=[\"Name\",\"Score\"], rows=[[\"Alice\",\"95\"],[\"Bob\",\"87\"]] and the table appears immediately.\n" +
-    "• **embed_image** — Call this to embed an existing image (by URL or file_id) into your response. The image appears INSTANTLY. Use this to show images the user uploaded, images you generated earlier, or public image URLs.\n" +
-    "• **generate_image** — Call this to generate a new AI image from a text prompt and inject it into your response. The image appears INSTANTLY after generation. You do NOT need to write any markdown — it's handled for you.\n" +
+    "• **embed_image** — Call this to embed an image into your response. THREE modes:\n" +
+    "    - **query**: pass query=\"a banana\" to FIND an image on the web and embed it. Use this when the user says 'find me an image of X', 'show me a picture of X', or 'find an image'. DO NOT use generate_image for 'find' requests — use embed_image with query instead.\n" +
+    "    - **url**: pass url=\"https://...\" to embed a specific image URL.\n" +
+    "    - **file_id**: pass file_id to embed a previously uploaded/generated file.\n" +
+    "  The image appears INSTANTLY. It is downloaded and served locally so it won't break.\n" +
+    "• **generate_image** — Call this to GENERATE a new AI image from a text prompt (e.g. 'a sunset over mountains'). Use this ONLY when the user explicitly wants to CREATE/GENERATE new art, not when they want to FIND an existing image. The image appears INSTANTLY after generation.\n" +
     "• When you call these tools, the content is added to your response automatically. Do NOT repeat the table/image markdown in your next message — just continue with any additional commentary or explanation.\n" +
     "• These tools make your responses richer and more visual. Use them whenever the user's request would benefit from a table or image — don't just describe data in text when you can show it."
   );
@@ -319,7 +323,13 @@ export async function* runAgentLoop(
       // We yield the result content as a text chunk so it flows into the
       // response instantly, then yield the tool_result for the thinking
       // indicator, and tell the model not to repeat the content.
-      if (STREAM_INJECT_TOOLS.has(tc.name) && !result.content.startsWith("Error:")) {
+      // Only inject if the result looks like valid markdown (starts with
+      // table/image syntax), NOT if it's an error message.
+      const isError = result.content.startsWith("Error:") ||
+        result.content.startsWith("Image generation error:") ||
+        result.content.startsWith("Search error:") ||
+        result.content.startsWith("Fetch error:");
+      if (STREAM_INJECT_TOOLS.has(tc.name) && !isError) {
         // Inject the markdown into the stream as text
         yield { type: "text", content: "\n\n" + result.content + "\n\n" };
         // Override the tool result message so the model knows it's already injected

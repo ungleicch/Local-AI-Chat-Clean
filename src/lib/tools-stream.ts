@@ -88,24 +88,35 @@ const createTable: ToolExecutor = {
 };
 
 // ---------- embed_image ----------
-// Embeds an existing image (by file ID or URL) into the response.
+// Embeds an image into the response. Three modes:
+//   1. query: search the web for an image and embed the first result
+//   2. url: embed a specific public image URL
+//   3. file_id: embed a previously uploaded/generated file
 const embedImage: ToolExecutor = {
   definition: {
     type: "function",
     function: {
       name: "embed_image",
       description:
-        "Embed an image into your response using its URL or a file ID from a previously uploaded/generated file. The image appears instantly in the chat. Use this to show images the user uploaded, images you generated earlier, or any public image URL.",
+        "Embed an image into your response. The image appears instantly in the chat. THREE ways to use it:\n" +
+        "1. **Find an image**: pass 'query' (e.g. 'a banana') — searches the web for a matching image and embeds it. Use this when the user says 'find me an image of X' or 'show me a picture of X'.\n" +
+        "2. **Embed by URL**: pass 'url' (a direct https image link) to embed a specific image.\n" +
+        "3. **Embed by file ID**: pass 'file_id' to embed a previously uploaded or generated file.\n" +
+        "The image is downloaded and served locally so it won't break due to hotlink protection.",
       parameters: {
         type: "object",
         properties: {
+          query: {
+            type: "string",
+            description: "Search query to find an image on the web (e.g. 'a banana', 'Eiffel Tower', 'a cute cat'). Use this when the user wants to FIND or SHOW an image, not generate one.",
+          },
           url: {
             type: "string",
-            description: "A public image URL (https://...) to embed directly",
+            description: "A direct public image URL (https://...) to embed. Use this when you already have a specific image URL.",
           },
           file_id: {
             type: "string",
-            description: "ID of a previously uploaded or generated file (use this if you have a file ID from upload or generate_image)",
+            description: "ID of a previously uploaded or generated file (from upload or generate_image)",
           },
           alt: {
             type: "string",
@@ -117,30 +128,230 @@ const embedImage: ToolExecutor = {
     },
   },
   async execute(args) {
+    const query = String(args.query || "");
     const url = String(args.url || "");
     const fileId = String(args.file_id || "");
-    const alt = String(args.alt || "image");
+    const alt = String(args.alt || query || "image");
 
-    if (!url && !fileId) {
-      return "Error: provide either 'url' or 'file_id'";
-    }
-
-    let imageSrc: string;
+    // --- Mode 3: embed by file_id ---
     if (fileId) {
-      // Verify the file exists in DB
       const file = await db.uploadedFile.findUnique({ where: { id: fileId } });
       if (!file) {
         return `Error: file not found with id ${fileId}`;
       }
-      imageSrc = `/api/files/${fileId}`;
-    } else {
-      imageSrc = url;
+      return `![${alt}](/api/files/${fileId})`;
     }
 
-    const markdown = `![${alt}](${imageSrc})`;
-    return markdown;
+    // --- Mode 2: embed by URL ---
+    if (url) {
+      // Download and re-serve locally to avoid hotlink protection / CORS issues
+      const localId = await downloadAndStoreImage(url);
+      if (localId) {
+        return `![${alt}](/api/files/${localId})`;
+      }
+      // Fallback: try embedding the URL directly
+      return `![${alt}](${url})`;
+    }
+
+    // --- Mode 1: search the web for an image ---
+    if (query) {
+      const imageUrl = await searchForImage(query);
+      if (!imageUrl) {
+        return `Error: could not find an image for "${query}". Try a different query or use generate_image instead.`;
+      }
+      const localId = await downloadAndStoreImage(imageUrl);
+      if (localId) {
+        return `![${alt}](/api/files/${localId})`;
+      }
+      // Fallback: try embedding the original URL
+      return `![${alt}](${imageUrl})`;
+    }
+
+    return "Error: provide one of 'query', 'url', or 'file_id'";
   },
 };
+
+/**
+ * Search for an image matching the query.
+ *
+ * Tries Wikimedia Commons first (public domain / CC images, no hotlink
+ * protection, reliable direct URLs) then falls back to DuckDuckGo image
+ * search. Returns a direct image URL that can be downloaded.
+ */
+async function searchForImage(query: string): Promise<string | null> {
+  // --- Source 1: Wikimedia Commons (most reliable) ---
+  const wikiUrl = await searchWikimediaCommons(query);
+  if (wikiUrl) return wikiUrl;
+
+  // --- Source 2: DuckDuckGo image search (fallback) ---
+  const ddgUrl = await searchDuckDuckGoImages(query);
+  if (ddgUrl) return ddgUrl;
+
+  return null;
+}
+
+/**
+ * Search Wikimedia Commons for an image. Returns a direct image URL.
+ * Wikimedia Commons images are public domain or Creative Commons licensed
+ * and can be freely downloaded and served.
+ */
+async function searchWikimediaCommons(query: string): Promise<string | null> {
+  try {
+    // Use the generator=search with namespace 6 (File:) to find image files
+    const apiUrl =
+      `https://commons.wikimedia.org/w/api.php?action=query&format=json` +
+      `&generator=search&gsrsearch=${encodeURIComponent(query)}` +
+      `&gsrnamespace=6&gsrlimit=5&prop=imageinfo` +
+      `&iiprop=url|mime|size&iiurlwidth=800`;
+
+    const resp = await fetch(apiUrl, {
+      headers: {
+        "User-Agent":
+          "LocalAIChatBot/1.0 (https://example.com; contact@example.com)",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    const pages = data?.query?.pages;
+    if (!pages) return null;
+
+    // Iterate pages, find the first one with a valid image URL
+    for (const page of Object.values<any>(pages)) {
+      const info = page.imageinfo?.[0];
+      if (!info) continue;
+      // Prefer the thumburl (resized) over the full url (can be huge)
+      const url = info.thumburl || info.url;
+      if (url && (info.mime?.startsWith("image/") || url.match(/\.(jpg|jpeg|png|gif|webp)/i))) {
+        return url;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Search DuckDuckGo for images. Less reliable than Wikimedia (hotlink
+ * protection, redirects) but covers a broader range of topics.
+ */
+async function searchDuckDuckGoImages(query: string): Promise<string | null> {
+  try {
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`;
+    const resp = await fetch(searchUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      },
+      redirect: "follow",
+    });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+
+    // Pattern 1: vqd-based image API (more reliable)
+    const vqdMatch = html.match(/vqd=['"](\d+-\d+(?:-\d+)?)['"]/);
+    if (vqdMatch) {
+      const vqd = vqdMatch[1];
+      const apiUrl = `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(query)}&vqd=${vqd}&f=,,,,,&p=1`;
+      const apiResp = await fetch(apiUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+          "Referer": "https://duckduckgo.com/",
+        },
+      });
+      if (apiResp.ok) {
+        const data = await apiResp.json();
+        if (data.results && data.results.length > 0) {
+          return data.results[0].image || data.results[0].thumbnail || null;
+        }
+      }
+    }
+
+    // Pattern 2: scrape image URLs from the HTML directly
+    const imgMatches = html.match(/https?:\/\/[^"'\s]+\.(?:jpg|jpeg|png|gif|webp)/gi);
+    if (imgMatches && imgMatches.length > 0) {
+      const filtered = imgMatches.filter(
+        (u) => !u.includes("favicon") && !u.includes("logo") && !u.includes("icon")
+      );
+      if (filtered.length > 0) return filtered[0];
+      return imgMatches[0];
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Download an image from a URL and store it locally so it can be served
+ * through /api/files/. Returns the file ID, or null on failure.
+ *
+ * The image is downloaded server-side (in the API route) so CORS doesn't
+ * apply. It's then served from /api/files/ID which is same-origin, avoiding
+ * OpaqueResponseBlocking (ORB) and hotlink protection issues.
+ */
+async function downloadAndStoreImage(imageUrl: string): Promise<string | null> {
+  try {
+    const resp = await fetch(imageUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        // Some image servers require an Accept header
+        "Accept": "image/*,*/*;q=0.8",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!resp.ok) return null;
+
+    // Determine content type — fall back to URL extension if header missing
+    let contentType = resp.headers.get("content-type") || "";
+    if (!contentType.startsWith("image/")) {
+      // Try to infer from URL
+      if (imageUrl.match(/\.(jpg|jpeg)(\?|$)/i)) contentType = "image/jpeg";
+      else if (imageUrl.match(/\.png(\?|$)/i)) contentType = "image/png";
+      else if (imageUrl.match(/\.gif(\?|$)/i)) contentType = "image/gif";
+      else if (imageUrl.match(/\.webp(\?|$)/i)) contentType = "image/webp";
+      else return null; // Not an image
+    }
+
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    // Skip empty responses — but don't require a large minimum size
+    // (some valid images like small thumbnails can be under 1KB)
+    if (buffer.length < 100) return null;
+
+    const ext = contentType.includes("png") ? "png"
+      : contentType.includes("gif") ? "gif"
+      : contentType.includes("webp") ? "webp"
+      : "jpg";
+
+    const imageId = crypto.randomUUID();
+    const filename = `${imageId}.${ext}`;
+    const storagePath = path.resolve(process.cwd(), "uploads", filename);
+    await fs.mkdir(path.dirname(storagePath), { recursive: true });
+    await fs.writeFile(storagePath, buffer);
+
+    await db.uploadedFile.create({
+      data: {
+        id: imageId,
+        filename: `web-image.${ext}`,
+        mimeType: contentType,
+        size: buffer.length,
+        storagePath,
+        extractedText: `Image from web: ${imageUrl}`,
+        extracted: true,
+      },
+    });
+
+    return imageId;
+  } catch {
+    return null;
+  }
+}
 
 // ---------- generate_image (enhanced, stream-injectable) ----------
 // Generates an image via AI and returns markdown that the agent loop injects.

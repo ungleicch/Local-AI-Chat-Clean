@@ -115,91 +115,110 @@ export function ThinkingIndicator({
   const hasToolCalls = events.some((e) => e.type === "tool_call" || e.type === "tool_result");
   const isStillWorking = isStreaming && (events.length > 0 || isThinking);
 
+  // Split events into:
+  //  - toolEvents: tool_call + tool_result (always shown inline, never collapsed)
+  //  - thinkingEvents: pure thinking text (collapsible, shown on demand)
+  const toolEvents = events.filter(
+    (e) => e.type === "tool_call" || e.type === "tool_result"
+  );
+  const thinkingEvents = events.filter((e) => e.type === "thinking");
+
   if (!isStillWorking && events.length === 0) return null;
 
-  // Determine spinner state
-  // - Just starting (no events): spinner alone
-  // - Thinking text coming in: spinner + click to expand thinking
-  // - Tool use: different spinner + click to expand tool calls
   const isToolActive = events.some(
     (e) => e.type === "tool_call" && e.status === "active"
   );
-  const lastEvent = events[events.length - 1];
+  const toolCallCount = events.filter((e) => e.type === "tool_call").length;
+  const hasThinkingText = thinkingEvents.length > 0;
 
   return (
-    <div className="flex items-start gap-2 py-2">
-      {/* Clickable spinner + summary */}
-      <button
-        onClick={onToggle}
-        className={cn(
-          "flex items-center gap-2 rounded-lg px-2 py-1 transition-all",
-          "hover:bg-foreground/5",
-          events.length > 0 && "cursor-pointer"
-        )}
-      >
-        {/* Spinner */}
-        {isStillWorking ? (
-          isToolActive || hasToolCalls ? (
-            // Tool use spinner — different color/symbol
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
-              className="flex h-3.5 w-3.5 items-center justify-center"
-            >
-              <Wrench className="h-3.5 w-3.5 text-foreground/70" />
-            </motion.div>
+    <div className="flex flex-col gap-1.5 py-2">
+      {/* --- Status header (spinner + summary) --- */}
+      {/* When still working OR has thinking text to toggle, make it a button. */}
+      {/* When done with only tool calls, it's just a non-interactive label. */}
+      {(isStillWorking || hasThinkingText) ? (
+        <button
+          onClick={hasThinkingText ? onToggle : undefined}
+          className={cn(
+            "flex items-center gap-2 rounded-lg px-2 py-0.5 transition-all w-fit",
+            hasThinkingText && "hover:bg-foreground/5 cursor-pointer"
+          )}
+        >
+          {/* Spinner / status icon */}
+          {isStillWorking ? (
+            isToolActive || (hasToolCalls && !hasThinkingText) ? (
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                className="flex h-3.5 w-3.5 items-center justify-center"
+              >
+                <Wrench className="h-3.5 w-3.5 text-foreground/70" />
+              </motion.div>
+            ) : (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground/60" />
+            )
           ) : (
-            // Thinking spinner
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground/60" />
-          )
-        ) : (
-          <CheckCircle2 className="h-3.5 w-3.5 text-foreground/40" />
-        )}
+            <CheckCircle2 className="h-3.5 w-3.5 text-foreground/40" />
+          )}
 
-        {/* Summary text */}
-        {events.length === 0 ? (
-          <span className="text-xs text-muted-foreground">Thinking…</span>
-        ) : (
+          {/* Summary text */}
           <span className="text-xs text-muted-foreground">
-            {hasToolCalls ? (
+            {events.length === 0 ? (
+              "Thinking…"
+            ) : hasToolCalls ? (
               <>
-                {isStillWorking ? "Working…" : "Done"} ·{" "}
-                {events.filter((e) => e.type === "tool_call").length} tool calls
+                {isStillWorking ? "Working…" : "Done"}
+                {toolCallCount > 0 && ` · ${toolCallCount} tool call${toolCallCount > 1 ? "s" : ""}`}
               </>
             ) : (
               <>{isStillWorking ? "Thinking…" : "Thought"}</>
             )}
           </span>
-        )}
 
-        {/* Expand chevron */}
-        {events.length > 0 && (
-          expanded ? (
-            <ChevronDown className="h-3 w-3 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground" />
-          )
-        )}
-      </button>
+          {/* Expand chevron — only if there's thinking text to toggle */}
+          {hasThinkingText && (
+            expanded ? (
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3 w-3 text-muted-foreground" />
+            )
+          )}
+        </button>
+      ) : toolEvents.length > 0 ? (
+        /* Done, only tool calls, no thinking text — minimal non-interactive header */
+        <div className="flex items-center gap-2 px-2 py-0.5">
+          <CheckCircle2 className="h-3.5 w-3.5 text-foreground/40" />
+          <span className="text-xs text-muted-foreground">
+            Done · {toolCallCount} tool call{toolCallCount > 1 ? "s" : ""}
+          </span>
+        </div>
+      ) : null}
 
-      {/* Expanded list */}
+      {/* --- Collapsible thinking text (reasoning) --- */}
       <AnimatePresence>
-        {expanded && events.length > 0 && (
+        {hasThinkingText && expanded && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.2 }}
-            className="flex-1 min-w-0 overflow-hidden"
+            className="ml-5 overflow-hidden border-l border-border/40 pl-3"
           >
-            <div className="space-y-1 ml-5 border-l border-border/40 pl-3">
-              {events.map((event) => (
-                <ThinkingEventRow key={event.id} event={event} />
-              ))}
-            </div>
+            {thinkingEvents.map((event) => (
+              <ThinkingEventRow key={event.id} event={event} />
+            ))}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* --- Tool call list (ALWAYS visible, never collapsed) --- */}
+      {toolEvents.length > 0 && (
+        <div className="ml-5 space-y-0.5 border-l border-border/40 pl-3">
+          {toolEvents.map((event) => (
+            <ThinkingEventRow key={event.id} event={event} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

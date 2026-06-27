@@ -139,11 +139,11 @@ function ProvidersTab() {
       if (data.seeded) {
         toast({
           title: "Default providers added",
-          description: `Seeded ${data.count} providers.`,
+          description: data.message || `Added ${data.added?.length || 0} provider(s).`,
         });
         refresh();
       } else {
-        toast({ title: "Already seeded" });
+        toast({ title: "Already seeded", description: data.message || "All defaults already exist." });
       }
     } catch (e) {
       toast({
