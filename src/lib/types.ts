@@ -15,6 +15,8 @@ export interface ChatMessage {
   thinking?: ThinkingEvent[];
   // Ordered content blocks for interleaved rendering (text + tool calls)
   blocks?: ContentBlock[];
+  // IDs of files attached to this user message
+  attachments?: string[];
 }
 
 export interface ThinkingEvent {

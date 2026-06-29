@@ -1,3 +1,5 @@
+// src/app/api/conversations/[id]/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
@@ -27,6 +29,8 @@ export async function GET(
         thinking: m.thinking ? JSON.parse(m.thinking) : undefined,
         // Restore ordered content blocks for interleaved rendering.
         blocks: m.blocks ? JSON.parse(m.blocks) : undefined,
+        // Restore attachment IDs so file previews survive reload.
+        attachments: m.attachments ? JSON.parse(m.attachments) : undefined,
         createdAt: m.createdAt.toISOString(),
       })),
       updatedAt: conv.updatedAt.toISOString(),

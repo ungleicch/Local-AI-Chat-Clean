@@ -1,3 +1,5 @@
+// src/app/api/chat/route.ts
+
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { runAgentLoop } from "@/lib/agent";
@@ -140,6 +142,9 @@ export async function POST(req: NextRequest) {
         // Track the current text block (so consecutive text chunks merge
         // into one block rather than creating many tiny blocks)
         let currentTextBlockIdx = -1;
+        // Track the current thinking block index (so consecutive thinking
+        // chunks merge into one block rather than creating many tiny blocks)
+        let currentThinkingBlockIdx = -1;
 
         for await (const chunk of runAgentLoop({
           providerId,
@@ -177,19 +182,27 @@ export async function POST(req: NextRequest) {
                   });
                   currentTextBlockIdx = contentBlocks.length - 1;
                 }
+                currentThinkingBlockIdx = -1; // text resets the current thinking block
               }
               break;
             case "thinking":
               // Reasoning content — send as a separate SSE event type.
               if (chunk.content) {
                 send("thinking", { content: chunk.content });
-                // Add as a thinking block (always new — don't merge with text)
-                contentBlocks.push({
-                  type: "thinking",
-                  content: chunk.content,
-                  timestamp: new Date().toISOString(),
-                  status: "active",
-                });
+                // Merge consecutive thinking chunks into one block (just like
+                // text chunks) so we don't create hundreds of tiny blocks.
+                if (currentThinkingBlockIdx >= 0 && contentBlocks[currentThinkingBlockIdx].type === "thinking") {
+                  contentBlocks[currentThinkingBlockIdx].content =
+                    (contentBlocks[currentThinkingBlockIdx].content || "") + chunk.content;
+                } else {
+                  contentBlocks.push({
+                    type: "thinking",
+                    content: chunk.content,
+                    timestamp: new Date().toISOString(),
+                    status: "active",
+                  });
+                  currentThinkingBlockIdx = contentBlocks.length - 1;
+                }
                 currentTextBlockIdx = -1; // next text starts a new block
                 // Collect for persistence (thinking events array)
                 if (!thinkingEventId) {
@@ -219,6 +232,7 @@ export async function POST(req: NextRequest) {
                   status: "active",
                 });
                 currentTextBlockIdx = -1; // next text starts a new block
+                currentThinkingBlockIdx = -1; // next thinking starts a new block
                 // Collect for persistence (thinking events array)
                 thinkingEvents.push({
                   id: chunk.toolCall.id,
@@ -241,6 +255,7 @@ export async function POST(req: NextRequest) {
                   status: "complete",
                 });
                 currentTextBlockIdx = -1; // next text starts a new block
+                currentThinkingBlockIdx = -1; // next thinking starts a new block
                 // Mark the corresponding tool_call event as complete
                 const callEvt = thinkingEvents.find(
                   (e) => e.id === chunk.toolResult!.toolCallId && e.type === "tool_call"

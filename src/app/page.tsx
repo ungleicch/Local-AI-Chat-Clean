@@ -207,6 +207,8 @@ export default function Home() {
               thinking: m.thinking || undefined,
               // Restore ordered content blocks for interleaved rendering.
               blocks: m.blocks || undefined,
+              // Restore attachment IDs so file previews survive reload.
+              attachments: m.attachments || undefined,
               status: m.status,
               createdAt: m.createdAt,
             }))
@@ -311,6 +313,7 @@ export default function Home() {
         content: text,
         status: "complete",
         createdAt: new Date().toISOString(),
+        attachments: attachmentIds.length > 0 ? attachmentIds : undefined,
       };
       addMessage(conversationId, userMsg);
       try {
@@ -375,6 +378,9 @@ export default function Home() {
       // Text and tool calls appear in the order they occur.
       const streamBlocks: ContentBlock[] = [];
       let currentTextBlockIdx = -1;
+      // Track current thinking block so consecutive thinking chunks merge
+      // into one block instead of creating hundreds of tiny blocks.
+      let currentThinkingBlockIdx = -1;
 
       try {
         const resp = await fetch("/api/chat", {
@@ -453,13 +459,19 @@ export default function Home() {
               } else {
                 appendToThinkingEvent(conversationId, assistantId, thinkingEventId, payload.content);
               }
-              // Add as a thinking block (interleaved)
-              streamBlocks.push({
-                type: "thinking",
-                content: payload.content,
-                timestamp: new Date().toISOString(),
-                status: "active",
-              });
+              // Merge consecutive thinking chunks into one block (just like text)
+              if (currentThinkingBlockIdx >= 0 && streamBlocks[currentThinkingBlockIdx].type === "thinking") {
+                streamBlocks[currentThinkingBlockIdx].content =
+                  (streamBlocks[currentThinkingBlockIdx].content || "") + payload.content;
+              } else {
+                streamBlocks.push({
+                  type: "thinking",
+                  content: payload.content,
+                  timestamp: new Date().toISOString(),
+                  status: "active",
+                });
+                currentThinkingBlockIdx = streamBlocks.length - 1;
+              }
               currentTextBlockIdx = -1;
               setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "tool_call" && payload.toolCall) {
@@ -487,6 +499,7 @@ export default function Home() {
                 status: "active",
               });
               currentTextBlockIdx = -1;
+              currentThinkingBlockIdx = -1;
               setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "tool_result" && payload.toolResult) {
               // Update the corresponding tool_call event to "complete"
@@ -514,6 +527,7 @@ export default function Home() {
                 status: "complete",
               });
               currentTextBlockIdx = -1;
+              currentThinkingBlockIdx = -1;
               setBlocks(conversationId, assistantId, [...streamBlocks]);
             } else if (eventType === "error" && payload.error) {
               setError(payload.error);

@@ -1,3 +1,5 @@
+// src/app/api/conversations/[id]/messages/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
@@ -19,6 +21,10 @@ export async function POST(
       conversationId,
       role: body.role || "user",
       content: body.content,
+      // Persist attachment IDs so file previews survive page reload.
+      attachments: body.attachments?.length > 0
+        ? JSON.stringify(body.attachments)
+        : null,
       status: "complete",
     },
   });

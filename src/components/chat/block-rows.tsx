@@ -168,7 +168,10 @@ export function ThinkingRow({
   content: string;
   isStreaming: boolean;
 }) {
-  const [expanded, setExpanded] = useState(isStreaming);
+  // Default to expanded so the reasoning content is always visible on
+  // initial render (both during streaming AND after page reload).
+  // The user can collapse it manually.
+  const [expanded, setExpanded] = useState(true);
 
   return (
     <div className="my-1 rounded-lg border border-border/30 bg-foreground/[0.02]">
