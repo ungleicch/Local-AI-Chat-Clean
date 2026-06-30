@@ -13,6 +13,60 @@ import { getAdapter } from "./providers";
 import { executeTool, getToolDefinitions, refreshCustomTools } from "./tools";
 import { STREAM_INJECT_TOOLS } from "./tools-stream";
 import { db } from "./db";
+import path from "node:path";
+import fs from "node:fs/promises";
+
+/**
+ * Given a tool call that just executed, determine whether it was a file-write
+ * operation and — if so — return the resolved absolute path + operation kind.
+ * Returns null for non-file-write tools.
+ *
+ * This drives the `file_write` SSE event that the frontend file panel
+ * listens for to update its tree and show live content.
+ *
+ * For workspace tools (write_file, append_file), the path is resolved
+ * relative to the conversation's workDir.
+ * For system tools (write_system_file, edit_file), the path is resolved
+ * as-is (absolute or relative to process.cwd()).
+ *
+ * `workDir` is the conversation workspace root, passed in from the agent
+ * options so we can resolve relative workspace paths correctly.
+ */
+function extractFileWriteInfo(
+  toolName: string,
+  args: Record<string, unknown>,
+  workDir: string
+): { operation: "create" | "write" | "edit" | "append"; path: string } | null {
+  // Workspace file tools — path is relative to workDir
+  if (toolName === "write_file") {
+    const rel = String(args.path || "");
+    if (!rel) return null;
+    return { operation: "write", path: path.resolve(workDir, rel) };
+  }
+  if (toolName === "append_file") {
+    const rel = String(args.path || "");
+    if (!rel) return null;
+    return { operation: "append", path: path.resolve(workDir, rel) };
+  }
+  // System file tools — path may be absolute or relative to cwd
+  if (toolName === "write_system_file") {
+    const p = String(args.path || "");
+    if (!p) return null;
+    return { operation: "write", path: path.resolve(p) };
+  }
+  if (toolName === "edit_file") {
+    const p = String(args.path || "");
+    if (!p) return null;
+    return { operation: "edit", path: path.resolve(p) };
+  }
+  // Virtual env file writes
+  if (toolName === "write_env_file") {
+    // env_id + path — we'd need to look up the env path from DB.
+    // For now, skip env file writes (the panel only shows the main workspace).
+    return null;
+  }
+  return null;
+}
 
 export interface AgentLoopOptions {
   providerId: string;
@@ -83,6 +137,19 @@ async function buildDynamicSystemPrompt(basePrompt?: string): Promise<string> {
     "• You can create new tools with create_tool (request via get_tools) if you find yourself needing a capability you don't have.\n" +
     "• You can evolve your own personality with update_soul (request via get_tools).\n" +
     "• Be concise. Think step by step. Always explain what you're doing briefly before calling tools.\n" +
+    "\n" +
+    "=== SOURCE CITATIONS (MANDATORY) ===\n" +
+    "• ALWAYS cite your sources for factual claims, statistics, quotes, news, or any information that did not come from your own training data. This is non-negotiable.\n" +
+    "• Use the citation marker syntax: [source:URL] or [source:URL|label] placed IMMEDIATELY AFTER the claim it supports (before any trailing punctuation).\n" +
+    "• Examples:\n" +
+    '    - The Eiffel Tower is 330m tall[source:https://en.wikipedia.org/wiki/Eiffel_Tower].\n' +
+    '    - Python was created in 1991[source:https://www.python.org|Python Software Foundation].\n' +
+    '    - According to recent reports[source:https://example.com/article|Article Title], the market grew 15%.\n' +
+    "• When you cite a source you found via web_search or web_fetch, use the URL you actually fetched — NOT the search result page URL. For Wikipedia, use the article URL (https://en.wikipedia.org/wiki/Article_Title).\n" +
+    "• Place the marker right after the sentence or fact it supports, NOT at the end of a long paragraph. Multiple markers in one paragraph are fine.\n" +
+    "• If you state a fact from your training data (general knowledge like 'water boils at 100°C'), no citation is needed. But for anything specific, recent, statistical, or controversial — CITE.\n" +
+    "• The markers are automatically stripped from the visible text and rendered as small link chips. You do NOT need to format them — just write [source:URL] inline.\n" +
+    "• NEVER fabricate URLs. If you don't have a real source, don't cite one — say 'I don't have a source for this' instead.\n" +
     "\n" +
     "=== RICH CONTENT TOOLS (always available — no need to request via get_tools) ===\n" +
     "• **create_table** — Call this to create a formatted table in your response. Provide 'headers' (array of column names) and 'rows' (array of row arrays). The table is injected into your response INSTANTLY — you do NOT need to write the markdown yourself. Example: call create_table with headers=[\"Name\",\"Score\"], rows=[[\"Alice\",\"95\"],[\"Bob\",\"87\"]] and the table appears immediately.\n" +
@@ -346,6 +413,51 @@ export async function* runAgentLoop(
           }
         ),
       };
+
+      // ---------- File-write event emission ----------
+      // When the agent writes, edits, or appends to a file, emit a
+      // file_write event so the frontend file panel can update its tree
+      // and display the live content of the file.
+      const fileWriteInfo = extractFileWriteInfo(tc.name, tc.arguments, opts.workDir);
+      if (fileWriteInfo) {
+        // Read back the file content AFTER the write so the panel shows
+        // the current state. For files outside the workspace (system
+        // files), we still emit the event — the panel will show the path
+        // but may not be able to display content (handled gracefully).
+        let fullContent = "";
+        try {
+          const resolved = fileWriteInfo.path;
+          // Only try to read if it looks like a path we can access
+          const buf = await fs.readFile(resolved);
+          // Don't send binary content — just signal it's binary
+          const head = buf.subarray(0, Math.min(buf.length, 8192));
+          if (!head.includes(0)) {
+            fullContent = buf.toString("utf8");
+            // Truncate to 100KB to avoid huge SSE payloads
+            if (fullContent.length > 100000) {
+              fullContent = fullContent.slice(0, 100000) + "\n\n... (truncated for display, full file is " + buf.length + " bytes)";
+            }
+          } else {
+            fullContent = `(Binary file, ${buf.length} bytes)`;
+          }
+        } catch {
+          // File may not exist (e.g. write failed) or be unreadable.
+          // Skip emitting the event — no point showing an empty file.
+        }
+        if (fullContent) {
+          yield {
+            type: "file_write",
+            fileWrite: {
+              operation: fileWriteInfo.operation,
+              path: fileWriteInfo.path,
+              content: fullContent,
+              conversationId: opts.conversationId,
+              toolName: tc.name,
+              timestamp: new Date().toISOString(),
+            },
+          };
+        }
+      }
 
       // Stream-injectable tools: their result IS markdown content (tables,
       // images, videos, etc.) that should appear in the response stream

@@ -1,3 +1,4 @@
+// src/lib/types.ts
 // Core type definitions for the chat platform
 
 export type Role = "user" | "assistant" | "system" | "tool";
@@ -96,12 +97,39 @@ export interface ToolDefinition {
 }
 
 export interface StreamChunk {
-  type: "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "step";
+  type: "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "step" | "file_write";
   content?: string;
   toolCall?: ToolCall;
   toolResult?: ToolResult;
   error?: string;
   step?: string;
+  fileWrite?: FileWriteEvent;
+}
+
+/**
+ * Emitted when the agent writes, edits, or appends to a file. The frontend
+ * file panel listens for these events to update its file tree and show the
+ * live content of the file being written.
+ *
+ * `path` is the workspace-relative path (or absolute system path for
+ * write_system_file / edit_file on system files). `content` is the full
+ * file content AFTER the write (so the panel can display the current state).
+ * For edit_file, this is the full file content after the edit was applied.
+ *
+ * `operation` indicates what kind of write happened:
+ *   - "create"  : a new file was created (write_file / write_system_file to a
+ *                 path that didn't exist before)
+ *   - "write"   : an existing file was overwritten
+ *   - "edit"    : a find-and-replace edit was applied
+ *   - "append"  : text was appended to an existing file
+ */
+export interface FileWriteEvent {
+  operation: "create" | "write" | "edit" | "append";
+  path: string;         // the path the tool wrote to
+  content: string;      // full file content after the write
+  conversationId: string;
+  toolName: string;     // which tool did the writing
+  timestamp: string;
 }
 
 /**

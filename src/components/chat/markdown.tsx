@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { BlockMath, InlineMath } from "react-katex";
 import "katex/dist/katex.min.css";
 import type { ReactNode } from "react";
+import { parseCitations } from "@/lib/citations";
+import { Citations } from "./citations";
 
 interface MarkdownProps {
   content: string;
@@ -112,6 +114,25 @@ function extractFinalAnswer(block: string): string | null {
 }
 
 /**
+ * Recursively extract all text content from a React node tree.
+ * Used to scan a paragraph's children for [source:URL] citation markers
+ * without losing the markers (which ReactMarkdown may split across multiple
+ * string children when inline formatting is present).
+ */
+function extractText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string") return node;
+  if (typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractText).join("");
+  if (React.isValidElement(node)) {
+    // Cast props to the shape we expect — React's types are loose here.
+    const props = node.props as { children?: ReactNode };
+    return extractText(props.children);
+  }
+  return "";
+}
+
+/**
  * Recursively walk React children and replace any string leaf with a
  * `<TextWithMath>` element. This is the reliable way to get inline math
  * (`$...$`) and display math (`$$...$$`) rendering under react-markdown v10,
@@ -179,9 +200,27 @@ export function Markdown({ content, className }: MarkdownProps) {
               {renderChildrenWithMath(children)}
             </h4>
           ),
-          p: ({ children }) => (
-            <p className="my-2 first:mt-0 last:mb-0">{renderChildrenWithMath(children)}</p>
-          ),
+          p: ({ children }) => {
+            // Extract raw text from children to scan for [source:URL] markers.
+            // We collect all citations found in this paragraph, strip the
+            // markers from the text, then render the cleaned text + a
+            // trailing <Citations> chip row.
+            const rawText = extractText(children);
+            const { text: cleanedText, citations } = parseCitations(rawText);
+
+            if (citations.length === 0) {
+              // No citations — render as before
+              return <p className="my-2 first:mt-0 last:mb-0">{renderChildrenWithMath(children)}</p>;
+            }
+
+            // Render the cleaned text (with math) + citation chips
+            return (
+              <p className="my-2 first:mt-0 last:mb-0">
+                {renderChildrenWithMath(cleanedText)}
+                <Citations citations={citations} />
+              </p>
+            );
+          },
           ul: ({ children }) => (
             <ul className="my-2 ml-5 list-disc space-y-1">{children}</ul>
           ),

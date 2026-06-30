@@ -1,14 +1,16 @@
+// src/app/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, X, PanelRightOpen, PanelRightClose } from "lucide-react";
 import { CircularSidebar } from "@/components/chat/circular-sidebar";
 import { MessageBubble } from "@/components/chat/message-bubble";
 import { MinimalComposer, type Attachment } from "@/components/chat/minimal-composer";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import { FilePanel } from "@/components/chat/file-panel";
 import { useChat } from "@/lib/stores/chat";
 import { useSettings } from "@/lib/stores/settings";
-import type { ChatMessage, StreamChunk, ThinkingEvent, ContentBlock } from "@/lib/types";
+import type { ChatMessage, StreamChunk, ThinkingEvent, ContentBlock, FileWriteEvent } from "@/lib/types";
 import { v4 as uuid } from "uuid";
 import { useToast } from "@/hooks/use-toast";
 import { useScrollSnapChat } from "@/hooks/use-scroll-snap-chat";
@@ -46,6 +48,10 @@ export default function Home() {
   const [currentProviderId, setCurrentProviderId] = useState<string | undefined>();
   const [currentModelId, setCurrentModelId] = useState<string | undefined>();
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // File panel state — shown on the right side, displays the conversation's
+  // workspace files and auto-opens when the AI writes/edits a file.
+  const [filePanelOpen, setFilePanelOpen] = useState(false);
+  const [fileWriteEvents, setFileWriteEvents] = useState<FileWriteEvent[]>([]);
 
   // Mark as mounted after first client render — prevents hydration mismatches
   // for values that differ between server (no providers) and client (loaded from API)
@@ -158,6 +164,11 @@ export default function Home() {
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, currentId]);
+
+  // ---------- Reset file panel state when conversation changes ----------
+  useEffect(() => {
+    setFileWriteEvents([]);
+  }, [currentId]);
 
   // ---------- Conversation management ----------
   const handleNewChat = useCallback(async () => {
@@ -529,6 +540,12 @@ export default function Home() {
               currentTextBlockIdx = -1;
               currentThinkingBlockIdx = -1;
               setBlocks(conversationId, assistantId, [...streamBlocks]);
+            } else if (eventType === "file_write" && payload.fileWrite) {
+              // The AI wrote/edited a file. Auto-open the file panel and
+              // append the event so the panel updates its tree + shows the
+              // live content.
+              setFileWriteEvents((prev) => [...prev, payload.fileWrite!]);
+              setFilePanelOpen(true);
             } else if (eventType === "error" && payload.error) {
               setError(payload.error);
             } else if (eventType === "done") {
@@ -616,77 +633,106 @@ export default function Home() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
-      {/* Main area — when empty, input bar is vertically centered */}
-      <main
-        className={
-          currentMessages.length === 0
-            ? "flex h-full flex-col items-center justify-center"
-            : "flex h-full flex-col"
-        }
-      >
-        {/* Error banner */}
-        <AnimatePresence>
-          {error && (
-            <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="mx-auto mt-4 flex max-w-2xl items-center gap-2 rounded-full bg-destructive/10 px-4 py-1.5 text-xs text-destructive"
-            >
-              <AlertCircle className="h-3 w-3 flex-shrink-0" />
-              <span className="flex-1 truncate">{error}</span>
-              <button
-                onClick={() => setError(null)}
-                className="hover:bg-destructive/10 rounded-full p-0.5"
+      {/* Main area — flex row: chat column (flex-1) + file panel (fixed width, toggleable) */}
+      <main className="flex h-full">
+        {/* Chat column — when empty, input bar is vertically centered */}
+        <div
+          className={
+            currentMessages.length === 0
+              ? "flex h-full flex-1 flex-col items-center justify-center"
+              : "flex h-full flex-1 flex-col"
+          }
+        >
+          {/* Error banner */}
+          <AnimatePresence>
+            {error && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="mx-auto mt-4 flex max-w-2xl items-center gap-2 rounded-full bg-destructive/10 px-4 py-1.5 text-xs text-destructive"
               >
-                <X className="h-3 w-3" />
+                <AlertCircle className="h-3 w-3 flex-shrink-0" />
+                <span className="flex-1 truncate">{error}</span>
+                <button
+                  onClick={() => setError(null)}
+                  className="hover:bg-destructive/10 rounded-full p-0.5"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Messages — always rendered so scrollRef stays attached; empty when no messages */}
+          <div ref={scrollRef} className={currentMessages.length === 0 ? "hidden" : "flex-1 overflow-y-auto"}>
+            {currentMessages.length > 0 && (
+              <div className="mx-auto max-w-3xl py-6">
+                {currentMessages.map((m, i) => (
+                  <MessageBubble
+                    key={m.id}
+                    message={m}
+                    isStreaming={
+                      isStreaming &&
+                      isLast(i) &&
+                      m.role === "assistant" &&
+                      m.status === "streaming"
+                    }
+                    isLast={isLast(i)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Composer row — composer + file panel toggle button on the right */}
+          <div className={currentMessages.length === 0 ? "w-full" : "mt-auto"}>
+            <div className="relative">
+              <MinimalComposer
+                onSend={handleSend}
+                onStop={handleStop}
+                isStreaming={isStreaming}
+                disabled={!mounted || !currentProviderId || !currentModelId}
+                providers={providers}
+                models={models}
+                providerId={currentProviderId}
+                modelId={currentModelId}
+                onModelChange={(p, m) => {
+                  setCurrentProviderId(p);
+                  setCurrentModelId(m);
+                }}
+                attachments={attachments}
+                onAttachmentsChange={setAttachments}
+                modelPickerOpen={modelPickerOpen}
+                onModelPickerOpenChange={setModelPickerOpen}
+              />
+              {/* File panel toggle — floats at the right edge of the composer area */}
+              <button
+                onClick={() => setFilePanelOpen(!filePanelOpen)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground transition-colors"
+                title={filePanelOpen ? "Hide workspace files" : "Show workspace files"}
+              >
+                {filePanelOpen ? (
+                  <PanelRightClose className="h-4 w-4" />
+                ) : (
+                  <PanelRightOpen className="h-4 w-4" />
+                )}
               </button>
-            </motion.div>
+            </div>
+          </div>
+        </div>
+
+        {/* File panel — right side, shows workspace files + live streaming content */}
+        <AnimatePresence>
+          {filePanelOpen && (
+            <FilePanel
+              conversationId={currentId}
+              fileWriteEvents={fileWriteEvents}
+              isOpen={filePanelOpen}
+              onOpenChange={setFilePanelOpen}
+            />
           )}
         </AnimatePresence>
-
-        {/* Messages — always rendered so scrollRef stays attached; empty when no messages */}
-        <div ref={scrollRef} className={currentMessages.length === 0 ? "hidden" : "flex-1 overflow-y-auto"}>
-          {currentMessages.length > 0 && (
-            <div className="mx-auto max-w-3xl py-6">
-              {currentMessages.map((m, i) => (
-                <MessageBubble
-                  key={m.id}
-                  message={m}
-                  isStreaming={
-                    isStreaming &&
-                    isLast(i) &&
-                    m.role === "assistant" &&
-                    m.status === "streaming"
-                  }
-                  isLast={isLast(i)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Composer — centered horizontally; vertically centered when empty, at bottom when chat has messages */}
-        <div className={currentMessages.length === 0 ? "w-full" : "mt-auto"}>
-          <MinimalComposer
-            onSend={handleSend}
-            onStop={handleStop}
-            isStreaming={isStreaming}
-            disabled={!mounted || !currentProviderId || !currentModelId}
-            providers={providers}
-            models={models}
-            providerId={currentProviderId}
-            modelId={currentModelId}
-            onModelChange={(p, m) => {
-              setCurrentProviderId(p);
-              setCurrentModelId(m);
-            }}
-            attachments={attachments}
-            onAttachmentsChange={setAttachments}
-            modelPickerOpen={modelPickerOpen}
-            onModelPickerOpenChange={setModelPickerOpen}
-          />
-        </div>
       </main>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

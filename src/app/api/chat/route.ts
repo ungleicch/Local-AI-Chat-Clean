@@ -1,4 +1,5 @@
 // src/app/api/chat/route.ts
+// src/app/api/chat/route.ts
 
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
@@ -286,6 +287,14 @@ export async function POST(req: NextRequest) {
               break;
             case "step":
               send("step", { step: chunk.step });
+              break;
+            case "file_write":
+              // Forward file-write events to the client. The frontend file
+              // panel listens for these to update its tree and show live
+              // content of the file being written.
+              if (chunk.fileWrite) {
+                send("file_write", { fileWrite: chunk.fileWrite });
+              }
               break;
             case "error":
               send("error", { error: chunk.error });

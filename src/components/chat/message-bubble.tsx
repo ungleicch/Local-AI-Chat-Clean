@@ -1,8 +1,15 @@
+// src/components/chat/message-bubble.tsx
 "use client";
 
 import { Markdown } from "./markdown";
 import { ThinkingIndicator } from "./thinking-indicator";
-import { ToolCallRow, ToolResultRow, ThinkingRow } from "./block-rows";
+import {
+  ToolCallRow,
+  ToolResultRow,
+  ThinkingRow,
+  PhaseGroup,
+  partitionBlocksForPhases,
+} from "./block-rows";
 import { cn } from "@/lib/utils";
 import type { ChatMessage, ContentBlock } from "@/lib/types";
 import { motion } from "framer-motion";
@@ -119,6 +126,12 @@ export function MessageBubble({ message, isStreaming, isLast }: MessageBubblePro
  * Renders ordered content blocks — text, tool calls, tool results, and
  * thinking — in the order they occurred. This makes tool calls appear
  * BETWEEN text statements instead of all grouped at the top.
+ *
+ * Phase grouping: when 5+ consecutive "action" blocks (thinking / tool_call
+ * / tool_result / short explanation text) appear in a row, they are collapsed
+ * into a single PhaseGroup with a summary header like "Searching for
+ * information". Clicking the header expands to show all the individual
+ * blocks. Long text blocks (> 120 chars) break the run and render standalone.
  */
 function BlocksRenderer({
   blocks,
@@ -127,31 +140,47 @@ function BlocksRenderer({
   blocks: ContentBlock[];
   isStreaming: boolean;
 }) {
-  // Group consecutive thinking blocks into a collapsible section.
-  // Text, tool_call, and tool_result blocks render inline in order.
-  const renderBlock = (block: ContentBlock, idx: number) => {
-    if (block.type === "text" && block.content) {
-      return (
-        <div key={idx} className="my-1">
-          <Markdown content={block.content} />
-        </div>
-      );
-    }
-    if (block.type === "thinking" && block.content) {
-      return <ThinkingRow key={idx} content={block.content} isStreaming={isStreaming} />;
-    }
-    if (block.type === "tool_call" && block.toolCall) {
-      return <ToolCallRow key={idx} toolCall={block.toolCall} status={block.status} />;
-    }
-    if (block.type === "tool_result" && block.toolResult) {
-      return <ToolResultRow key={idx} toolResult={block.toolResult} />;
-    }
-    return null;
-  };
+  // Partition blocks into segments: singles (rendered standalone) and
+  // groups (collapsed PhaseGroup with summary header).
+  const segments = partitionBlocksForPhases(blocks);
 
   return (
     <>
-      {blocks.map((block, idx) => renderBlock(block, idx))}
+      {segments.map((seg, idx) => {
+        if (seg.kind === "group") {
+          return (
+            <PhaseGroup
+              key={idx}
+              blocks={seg.blocks}
+              label={seg.label}
+              iconType={seg.iconType}
+              isStreaming={isStreaming}
+              // While streaming, expand the active group so the user can see
+              // what's happening in real-time. Once streaming completes, the
+              // group collapses to a summary.
+              defaultExpanded={isStreaming}
+            />
+          );
+        }
+        const block = seg.block;
+        if (block.type === "text" && block.content) {
+          return (
+            <div key={idx} className="my-1">
+              <Markdown content={block.content} />
+            </div>
+          );
+        }
+        if (block.type === "thinking" && block.content) {
+          return <ThinkingRow key={idx} content={block.content} isStreaming={isStreaming} />;
+        }
+        if (block.type === "tool_call" && block.toolCall) {
+          return <ToolCallRow key={idx} toolCall={block.toolCall} status={block.status} />;
+        }
+        if (block.type === "tool_result" && block.toolResult) {
+          return <ToolResultRow key={idx} toolResult={block.toolResult} />;
+        }
+        return null;
+      })}
       {isStreaming && (
         <span className="inline-block h-3 w-1.5 animate-pulse rounded-sm bg-foreground/40 align-middle ml-0.5" />
       )}
