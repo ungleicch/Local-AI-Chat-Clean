@@ -1,3 +1,4 @@
+// src/components/chat/block-rows.tsx
 "use client";
 
 import { useState } from "react";
@@ -23,6 +24,10 @@ const toolIconMap: Record<string, { type: string; label: string }> = {
   list_past_chats: { type: "history", label: "Listed past chats" },
   web_search: { type: "search", label: "Searched web" },
   web_fetch: { type: "search", label: "Fetched URL" },
+  image_search: { type: "search", label: "Searched images" },
+  news_search: { type: "search", label: "Searched news" },
+  wikipedia_search: { type: "search", label: "Searched Wikipedia" },
+  wikipedia_read: { type: "search", label: "Read Wikipedia" },
   execute_code: { type: "code", label: "Ran code" },
   calculate: { type: "code", label: "Calculated" },
   create_env: { type: "cpu", label: "Created env" },
@@ -35,6 +40,12 @@ const toolIconMap: Record<string, { type: string; label: string }> = {
   find_files: { type: "file", label: "Found files" },
   read_system_file: { type: "file", label: "Read file" },
   write_system_file: { type: "file", label: "Wrote file" },
+  edit_file: { type: "file", label: "Edited file" },
+  append_file: { type: "file", label: "Appended to file" },
+  create_directory: { type: "file", label: "Created directory" },
+  delete_file: { type: "file", label: "Deleted file" },
+  move_file: { type: "file", label: "Moved file" },
+  copy_file: { type: "file", label: "Copied file" },
   list_pending_changes: { type: "file", label: "Listed changes" },
   restore_file: { type: "file", label: "Restored file" },
   create_tool: { type: "wrench", label: "Created tool" },
@@ -47,6 +58,10 @@ const toolIconMap: Record<string, { type: string; label: string }> = {
   list_files: { type: "file", label: "Listed files" },
   create_table: { type: "file", label: "Created table" },
   embed_image: { type: "file", label: "Embedded image" },
+  embed_youtube: { type: "file", label: "Embedded video" },
+  embed_video: { type: "file", label: "Embedded video" },
+  embed_audio: { type: "file", label: "Embedded audio" },
+  embed_link_preview: { type: "file", label: "Embedded link preview" },
   generate_image: { type: "file", label: "Generated image" },
   get_tools: { type: "wrench", label: "Requested tools" },
 };
@@ -58,13 +73,20 @@ function getToolMeta(name: string) {
 function formatToolArgs(name: string, args: Record<string, unknown>): string {
   if (name === "web_search") return String(args.query || "");
   if (name === "web_fetch") return String(args.url || "");
+  if (name === "image_search") return String(args.query || "");
+  if (name === "news_search") return String(args.query || "");
+  if (name === "wikipedia_search") return String(args.query || "");
+  if (name === "wikipedia_read") return String(args.title || "");
   if (name === "calculate") return String(args.expression || "");
   if (name === "execute_code") {
     const code = String(args.code || "");
     return code.length > 80 ? code.slice(0, 80) + "…" : code;
   }
-  if (["read_file", "write_file", "read_system_file", "write_system_file", "read_env_file", "write_env_file"].includes(name))
+  if (["read_file", "write_file", "read_system_file", "write_system_file", "read_env_file", "write_env_file", "append_file", "create_directory"].includes(name))
     return String(args.path || "");
+  if (name === "edit_file") return `${args.path || ""}`;
+  if (name === "delete_file") return String(args.path || "");
+  if (name === "move_file" || name === "copy_file") return `${args.source || ""} → ${args.destination || ""}`;
   if (name === "list_files" || name === "find_files") return String(args.pattern || args.path || ".");
   if (name === "memory_search") return String(args.keyword || "");
   if (name === "memory_store") return `${args.key}`;
@@ -74,6 +96,8 @@ function formatToolArgs(name: string, args: Record<string, unknown>): string {
   if (name === "extract_file") return String(args.file_id || "");
   if (name === "create_table") return `${(args.headers as string[])?.length || 0} cols`;
   if (name === "embed_image") return String(args.query || args.url || args.file_id || "");
+  if (name === "embed_youtube") return String(args.url || "");
+  if (name === "embed_video" || name === "embed_audio" || name === "embed_link_preview") return String(args.url || "");
   if (name === "generate_image") return String(args.prompt || "").slice(0, 60);
   return Object.keys(args).length > 0 ? JSON.stringify(args).slice(0, 80) : "";
 }

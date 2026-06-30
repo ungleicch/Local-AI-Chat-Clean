@@ -1,3 +1,4 @@
+// src/lib/agent.ts
 // Agent loop engine — orchestrates multi-step reasoning with tool use.
 // Streams events: assistant text → tool calls → tool results → next assistant turn → ...
 
@@ -73,12 +74,12 @@ async function buildDynamicSystemPrompt(basePrompt?: string): Promise<string> {
 
   parts.push(
     "=== GUIDELINES ===\n" +
-    "• You have web_search and get_tools always available. For any other capability, call get_tools with a description of the task you want to perform, and the relevant tools will be added to your available set.\n" +
-    "• For anything that needs current info, use web_search.\n" +
+    "• You have web_search, web_fetch, and get_tools always available. For any other capability, call get_tools with a description of the task you want to perform, and the relevant tools will be added to your available set.\n" +
+    "• For anything that needs current info, use web_search. For deeper reading of a specific page, use web_fetch.\n" +
     "• When you need to calculate, write code, read/write files, use memory, create virtual environments, generate images, or any other task — call get_tools first to request those tools.\n" +
     "• For building/compiling/running risky commands, ALWAYS create a virtual env first (request via get_tools), run inside it, then copy the result out. Never run build commands directly on the host.\n" +
-    "• For reading files the user references, request read_system_file via get_tools. For modifying files, request write_system_file (it auto-backs-up).\n" +
-    "• When the user uploads files, request extract_file via get_tools to read their contents.\n" +
+    "• For reading files the user references, request read_system_file via get_tools. For modifying files, request write_system_file (it auto-backs-up) or edit_file for find/replace edits.\n" +
+    "• When the user uploads files, request extract_file via get_tools to read their contents. Supports PDFs, images (OCR), Office docs, spreadsheets, presentations, audio, video, and more.\n" +
     "• You can create new tools with create_tool (request via get_tools) if you find yourself needing a capability you don't have.\n" +
     "• You can evolve your own personality with update_soul (request via get_tools).\n" +
     "• Be concise. Think step by step. Always explain what you're doing briefly before calling tools.\n" +
@@ -91,8 +92,12 @@ async function buildDynamicSystemPrompt(basePrompt?: string): Promise<string> {
     "    - **file_id**: pass file_id to embed a previously uploaded/generated file.\n" +
     "  The image appears INSTANTLY. It is downloaded and served locally so it won't break.\n" +
     "• **generate_image** — Call this to GENERATE a new AI image from a text prompt (e.g. 'a sunset over mountains'). Use this ONLY when the user explicitly wants to CREATE/GENERATE new art, not when they want to FIND an existing image. The image appears INSTANTLY after generation.\n" +
-    "• When you call these tools, the content is added to your response automatically. Do NOT repeat the table/image markdown in your next message — just continue with any additional commentary or explanation.\n" +
-    "• These tools make your responses richer and more visual. Use them whenever the user's request would benefit from a table or image — don't just describe data in text when you can show it."
+    "• **embed_youtube** — Call this to embed a YouTube video. Pass a YouTube URL (watch?v=, youtu.be, /embed/, /shorts/) or a bare 11-char video ID. The video appears as a responsive iframe player INSTANTLY. Use this when the user shares a YouTube link or asks to embed a video.\n" +
+    "• **embed_video** — Call this to embed a direct video file URL (mp4, webm, ogg) as an HTML5 video player. Use this for direct video links (NOT YouTube — use embed_youtube for those).\n" +
+    "• **embed_audio** — Call this to embed a direct audio file URL (mp3, wav, ogg) as an HTML5 audio player.\n" +
+    "• **embed_link_preview** — Call this to render a rich link preview card (with title, description, and image) for any URL. Use this when the user shares a link and you want a nice preview rather than a plain hyperlink.\n" +
+    "• When you call these tools, the content is added to your response automatically. Do NOT repeat the table/image/video markdown in your next message — just continue with any additional commentary or explanation.\n" +
+    "• These tools make your responses richer and more visual. Use them whenever the user's request would benefit from a table, image, video, or link preview — don't just describe data in text when you can show it."
   );
 
   return parts.join("\n\n");
@@ -111,16 +116,22 @@ export async function* runAgentLoop(
   const dynamicSystemPrompt = await buildDynamicSystemPrompt(opts.systemPrompt);
 
   // Tools currently available to the model — starts with the always-bound set.
-  // Stream-injectable tools (create_table, embed_image, generate_image) are
-  // always available so the model can produce rich content immediately without
+  // Stream-injectable tools (create_table, embed_image, generate_image,
+  // embed_youtube, embed_video, embed_audio, embed_link_preview) are always
+  // available so the model can produce rich content immediately without
   // needing to request them via get_tools first.
   const allToolDefs = getToolDefinitions(undefined); // all tools
   const alwaysBoundToolNames = new Set([
     "web_search",
+    "web_fetch",
     "get_tools",
     "create_table",
     "embed_image",
     "generate_image",
+    "embed_youtube",
+    "embed_video",
+    "embed_audio",
+    "embed_link_preview",
   ]);
 
   // Tools currently available to the model — starts with just web_search + get_tools
@@ -225,10 +236,20 @@ export async function* runAgentLoop(
         // Match tools based on task description keywords
         const toolKeywords: Record<string, string[]> = {
           web_fetch: ["fetch", "url", "website", "page", "read url", "web page"],
+          image_search: ["image search", "find image", "search images", "image results", "pictures"],
+          news_search: ["news", "current events", "breaking", "recent articles", "headlines"],
+          wikipedia_search: ["wikipedia", "encyclopedia", "wiki"],
+          wikipedia_read: ["read wikipedia", "wikipedia article", "wiki article"],
           execute_code: ["code", "javascript", "script", "run", "program", "function"],
           calculate: ["math", "calculate", "computation", "arithmetic", "equation", "formula"],
           read_file: ["read file", "file content", "open file", "workspace file"],
           write_file: ["write file", "create file", "save file", "workspace"],
+          edit_file: ["edit file", "modify file", "find replace", "patch file", "change in file"],
+          append_file: ["append file", "add to file", "append to"],
+          create_directory: ["create directory", "make folder", "mkdir", "new folder"],
+          delete_file: ["delete file", "remove file", "rm file"],
+          move_file: ["move file", "rename file", "mv file"],
+          copy_file: ["copy file", "duplicate file", "cp file"],
           list_files: ["list files", "directory", "files in", "browse"],
           memory_search: ["memory", "remember", "user profile", "facts about user"],
           memory_store: ["store memory", "save fact", "remember about user"],
@@ -254,11 +275,15 @@ export async function* runAgentLoop(
           create_tool: ["create tool", "new tool", "custom tool"],
           list_custom_tools: ["list custom tools", "my tools"],
           delete_custom_tool: ["delete tool", "remove tool"],
-          extract_file: ["extract file", "pdf", "image text", "ocr", "document"],
+          extract_file: ["extract file", "pdf", "image text", "ocr", "document", "docx", "xlsx", "spreadsheet", "presentation"],
           list_uploaded_files: ["uploaded files", "attachments"],
           generate_image: ["generate image", "create image", "picture", "draw", "image"],
           create_table: ["table", "tabular", "grid", "spreadsheet", "columns and rows"],
           embed_image: ["embed image", "show image", "display image", "insert image", "picture in response"],
+          embed_youtube: ["youtube", "embed video", "yt video", "video link"],
+          embed_video: ["embed video file", "mp4", "webm", "video url"],
+          embed_audio: ["embed audio", "mp3", "audio player", "audio url"],
+          embed_link_preview: ["link preview", "card preview", "url preview", "og card"],
         };
         const matchedToolNames = new Set<string>();
         for (const [toolName, keywords] of Object.entries(toolKeywords)) {
@@ -323,17 +348,19 @@ export async function* runAgentLoop(
       };
 
       // Stream-injectable tools: their result IS markdown content (tables,
-      // images) that should appear in the response stream immediately —
-      // without waiting for the model to re-generate it in the next step.
-      // We yield the result content as a text chunk so it flows into the
-      // response instantly, then yield the tool_result for the thinking
-      // indicator, and tell the model not to repeat the content.
-      // Only inject if the result looks like valid markdown (starts with
-      // table/image syntax), NOT if it's an error message.
-      const isError = result.content.startsWith("Error:") ||
-        result.content.startsWith("Image generation error:") ||
-        result.content.startsWith("Search error:") ||
-        result.content.startsWith("Fetch error:");
+      // images, videos, etc.) that should appear in the response stream
+      // immediately — without waiting for the model to re-generate it in the
+      // next step. We yield the result content as a text chunk so it flows
+      // into the response instantly, then yield the tool_result for the
+      // thinking indicator, and tell the model not to repeat the content.
+      // Only inject if the result looks like valid markdown, NOT if it's an
+      // error message.
+      const isError = /^Error:/i.test(result.content) ||
+        /^Image generation error:/i.test(result.content) ||
+        /^Search error:/i.test(result.content) ||
+        /^Fetch error:/i.test(result.content) ||
+        /^PDF extraction failed:/i.test(result.content) ||
+        /^Could not /i.test(result.content);
       if (STREAM_INJECT_TOOLS.has(tc.name) && !isError) {
         // Inject the markdown into the stream as text
         yield { type: "text", content: "\n\n" + result.content + "\n\n" };

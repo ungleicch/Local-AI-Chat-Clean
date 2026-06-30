@@ -1,3 +1,4 @@
+// src/lib/tools.ts
 // Tool registry — defines all tools the agent can call.
 // Each tool: name, description, JSON schema, executor.
 
@@ -11,6 +12,15 @@ import { systemTools, loadCustomTools } from "./tools-system";
 import { fileTools } from "./tools-files";
 import { imageTools } from "./tools-image";
 import { streamTools } from "./tools-stream";
+import { searchTools } from "./tools-search";
+import { embedTools } from "./tools-embed";
+import {
+  searchDuckDuckGoWeb,
+  searchWikipedia,
+  fetchWikipediaExtract,
+  htmlToReadableText,
+  fetchWithUA,
+} from "./search-utils";
 
 export interface ToolExecutor {
   definition: ToolDefinition;
@@ -28,13 +38,17 @@ export interface ToolContext {
 }
 
 // ---------- Web Search ----------
+// Tries multiple sources in parallel for robustness:
+//   1. Wikipedia  — best for factual / encyclopedic queries
+//   2. DuckDuckGo — broad web results
+// Wikipedia results come first (higher quality snippets), then DDG.
 const webSearch: ToolExecutor = {
   definition: {
     type: "function",
     function: {
       name: "web_search",
       description:
-        "Search the web for up-to-date information. Returns relevant search results with titles, URLs, and snippets. Use this when you need current info, facts, or to look up anything beyond your training data.",
+        "Search the web for up-to-date information. Returns titles, URLs, and snippets from multiple sources (Wikipedia + DuckDuckGo). Use this when you need current info, facts, or to look up anything beyond your training data. For deeper info on a topic, follow up with web_fetch on a promising URL.",
       parameters: {
         type: "object",
         properties: {
@@ -44,7 +58,11 @@ const webSearch: ToolExecutor = {
           },
           max_results: {
             type: "number",
-            description: "Maximum number of results to return (default 5)",
+            description: "Maximum number of results to return per source (default 4)",
+          },
+          include_wikipedia: {
+            type: "boolean",
+            description: "Whether to include Wikipedia results (default true). Set false for purely news/web queries.",
           },
         },
         required: ["query"],
@@ -52,78 +70,70 @@ const webSearch: ToolExecutor = {
     },
   },
   async execute(args) {
-    const query = String(args.query || "");
-    const maxResults = Number(args.max_results) || 5;
+    const query = String(args.query || "").trim();
+    const maxPerSource = Math.min(Number(args.max_results) || 4, 8);
+    const includeWiki = args.include_wikipedia !== false;
     if (!query) return "Error: query is required";
 
-    // Try DuckDuckGo HTML endpoint — no API key needed, works well for snippets.
-    try {
-      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-      const resp = await fetch(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        },
-      });
-      if (!resp.ok) return `Search failed: ${resp.status}`;
-      const html = await resp.text();
-      const results: Array<{ title: string; url: string; snippet: string }> =
-        [];
-      // Parse result blocks
-      const blocks = html.split(/<div class="result results_links results_links_deep web-result ">|<div class="result results_links results_links_deep web-result ">/);
-      for (const block of blocks.slice(1)) {
-        if (results.length >= maxResults) break;
-        const titleMatch = block.match(
-          /<a[^>]*class="result__a"[^>]*>(.*?)<\/a>/s
-        );
-        const urlMatch = block.match(
-          /<a[^>]*class="result__a"[^>]*href="([^"]+)"/
-        );
-        const snippetMatch = block.match(
-          /<a[^>]*class="result__snippet"[^>]*>(.*?)<\/a>/s
-        );
-        if (titleMatch && urlMatch) {
-          const title = titleMatch[1].replace(/<[^>]+>/g, "").trim();
-          let href = urlMatch[1];
-          // DuckDuckGo wraps URLs — unwrap if needed
-          const udcMatch = href.match(/uddg=([^&]+)/);
-          if (udcMatch) href = decodeURIComponent(udcMatch[1]);
-          const snippet = snippetMatch
-            ? snippetMatch[1].replace(/<[^>]+>/g, "").trim()
-            : "";
-          results.push({ title, url: href, snippet });
-        }
+    // Fire both searches in parallel for speed
+    const [wikiRes, ddgRes] = await Promise.all([
+      includeWiki ? searchWikipedia(query, 3) : Promise.resolve([]),
+      searchDuckDuckGoWeb(query, maxPerSource),
+    ]);
+
+    const lines: string[] = [];
+    let i = 1;
+
+    if (wikiRes.length > 0) {
+      lines.push("=== Wikipedia ===");
+      for (const r of wikiRes) {
+        lines.push(`${i}. ${r.title}`);
+        lines.push(`   URL: ${r.url}`);
+        if (r.snippet) lines.push(`   ${r.snippet}`);
+        lines.push("");
+        i++;
       }
-      if (results.length === 0) {
-        return `No results found for: ${query}`;
-      }
-      return results
-        .map(
-          (r, i) =>
-            `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
-        )
-        .join("\n\n");
-    } catch (e) {
-      return `Search error: ${(e as Error).message}`;
     }
+
+    if (ddgRes.length > 0) {
+      lines.push("=== Web ===");
+      for (const r of ddgRes) {
+        lines.push(`${i}. ${r.title}`);
+        lines.push(`   URL: ${r.url}`);
+        if (r.snippet) lines.push(`   ${r.snippet}`);
+        lines.push("");
+        i++;
+      }
+    }
+
+    if (lines.length === 0) {
+      return `No results found for: ${query}`;
+    }
+    return lines.join("\n").trim();
   },
 };
 
 // ---------- Web Fetch ----------
+// Smarter page reader:
+//   • Auto-detects content type (HTML / JSON / plain text / PDF)
+//   • For HTML, extracts main content (readability heuristic) instead of all text
+//   • For Wikipedia URLs, uses the API to get a clean extract (no nav noise)
+//   • For JSON APIs, pretty-prints the response
+//   • For PDFs, downloads and runs pdftotext
 const webFetch: ToolExecutor = {
   definition: {
     type: "function",
     function: {
       name: "web_fetch",
       description:
-        "Fetch the content of a web page URL. Returns the page text content (HTML stripped). Useful for reading articles, documentation, or any accessible web page.",
+        "Fetch the content of a web page URL and return readable text. Handles HTML (extracts main article content, strips nav/ads), JSON (pretty-prints), plain text, and PDFs (extracts text via pdftotext). For Wikipedia URLs, uses the API for a clean extract. Useful for reading articles, documentation, or any accessible web page.",
       parameters: {
         type: "object",
         properties: {
           url: { type: "string", description: "The URL to fetch" },
           max_chars: {
             type: "number",
-            description: "Maximum characters to return (default 8000)",
+            description: "Maximum characters to return (default 12000)",
           },
         },
         required: ["url"],
@@ -131,39 +141,65 @@ const webFetch: ToolExecutor = {
     },
   },
   async execute(args) {
-    const url = String(args.url || "");
-    const maxChars = Number(args.max_chars) || 8000;
+    const url = String(args.url || "").trim();
+    const maxChars = Number(args.max_chars) || 12000;
     if (!url) return "Error: url is required";
+
+    // --- Special case: Wikipedia article → use API for clean extract ---
+    const wikiMatch = url.match(/^https?:\/\/en\.wikipedia\.org\/wiki\/(.+)$/);
+    if (wikiMatch) {
+      const title = decodeURIComponent(wikiMatch[1].replace(/_/g, " ").replace(/#.*/, ""));
+      const extract = await fetchWikipediaExtract(title);
+      if (extract) return extract.slice(0, maxChars);
+    }
+
     try {
-      const resp = await fetch(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        },
-        redirect: "follow",
-      });
-      if (!resp.ok) return `Fetch failed: ${resp.status}`;
-      const ct = resp.headers.get("content-type") || "";
-      const raw = await resp.text();
-      let text: string;
-      if (ct.includes("text/html")) {
-        // Strip tags, scripts, styles
-        text = raw
-          .replace(/<script[\s\S]*?<\/script>/gi, "")
-          .replace(/<style[\s\S]*?<\/style>/gi, "")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&nbsp;/g, " ")
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;/g, "'")
-          .replace(/\s+/g, " ")
-          .trim();
-      } else {
-        text = raw;
+      const resp = await fetchWithUA(url, { redirect: "follow" }, { timeoutMs: 20000 });
+      if (!resp.ok) return `Fetch failed: ${resp.status} ${resp.statusText}`;
+      const ct = (resp.headers.get("content-type") || "").toLowerCase();
+
+      // --- PDF: extract text via pdftotext ---
+      if (ct.includes("application/pdf") || url.toLowerCase().endsWith(".pdf")) {
+        try {
+          const buf = Buffer.from(await resp.arrayBuffer());
+          const { exec } = await import("node:child_process");
+          const { promisify } = await import("node:util");
+          const execAsync = promisify(exec);
+          const tmpPath = path.join(process.cwd(), "workspace", ".cache", `fetch-${Date.now()}.pdf`);
+          await fs.mkdir(path.dirname(tmpPath), { recursive: true });
+          await fs.writeFile(tmpPath, buf);
+          const { stdout } = await execAsync(`pdftotext -layout ${JSON.stringify(tmpPath)} -`, {
+            maxBuffer: 10 * 1024 * 1024,
+            timeout: 30000,
+          });
+          await fs.unlink(tmpPath).catch(() => {});
+          const text = stdout || "(no text extracted from PDF)";
+          return text.slice(0, maxChars);
+        } catch (e) {
+          return `PDF extraction failed: ${(e as Error).message}`;
+        }
       }
-      return text.slice(0, maxChars);
+
+      // --- JSON: pretty-print ---
+      if (ct.includes("application/json") || url.toLowerCase().endsWith(".json")) {
+        try {
+          const data = await resp.json();
+          return JSON.stringify(data, null, 2).slice(0, maxChars);
+        } catch {
+          // fall through to text
+        }
+      }
+
+      const raw = await resp.text();
+
+      // --- HTML: extract main content ---
+      if (ct.includes("text/html") || ct.includes("application/xhtml")) {
+        const text = htmlToReadableText(raw, maxChars);
+        return text || "(empty page)";
+      }
+
+      // --- Plain text / unknown: return as-is ---
+      return raw.slice(0, maxChars);
     } catch (e) {
       return `Fetch error: ${(e as Error).message}`;
     }
@@ -420,6 +456,8 @@ export const toolRegistry: Record<string, ToolExecutor> = {
   ...systemTools,
   ...fileTools,
   ...imageTools,
+  ...searchTools,
+  ...embedTools,
   ...streamTools,
 };
 

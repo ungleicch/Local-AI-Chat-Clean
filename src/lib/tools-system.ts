@@ -1,3 +1,4 @@
+// src/lib/tools-system.ts
 // Safe system file tools + custom tool creation framework
 import type { ToolDefinition } from "./types";
 import type { ToolExecutor, ToolContext } from "./tools";
@@ -86,8 +87,9 @@ const readSystemFile: ToolExecutor = {
     try {
       const resolved = path.resolve(filePath);
       const buf = await fs.readFile(resolved);
-      // Try UTF8, fall back to base64 for binaries
-      const isText = !buf.includes(0, 0, Math.min(buf.length, 8000));
+      // Check the first 8KB for null bytes — if present, treat as binary
+      const head = buf.subarray(0, Math.min(buf.length, 8000));
+      const isText = !head.includes(0);
       if (isText) {
         const text = buf.toString("utf8");
         return text.length > 20000 ? text.slice(0, 20000) + "\n... (truncated)" : text;
@@ -175,6 +177,274 @@ const listPendingChanges: ToolExecutor = {
           `${i + 1}. ${b.originalPath}\n   Backup: ${b.backupPath}\n   Changed: ${b.createdAt.toISOString().slice(0, 16)}`
       )
       .join("\n\n");
+  },
+};
+
+// ---------- Edit File (find & replace) ----------
+// Makes targeted edits to a file by replacing a unique old string with a new
+// string. Auto-backs-up the file before editing (same as write_system_file).
+const editFile: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "edit_file",
+      description:
+        "Edit a file by replacing a specific old_string with new_string. Creates a backup automatically before editing. The old_string must appear EXACTLY ONCE in the file (use enough context to make it unique). Use this for surgical edits instead of rewriting the whole file. For creating new files or full rewrites, use write_file or write_system_file.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path (absolute or relative)" },
+          old_string: {
+            type: "string",
+            description: "The exact text to find in the file. Must be unique — include enough surrounding context to match only one location.",
+          },
+          new_string: {
+            type: "string",
+            description: "The text to replace old_string with. Can be empty (to delete).",
+          },
+          replace_all: {
+            type: "boolean",
+            description: "If true, replace ALL occurrences of old_string (default false — requires unique match).",
+          },
+        },
+        required: ["path", "old_string", "new_string"],
+      },
+    },
+  },
+  async execute(args) {
+    const filePath = String(args.path || "");
+    const oldStr = String(args.old_string ?? "");
+    const newStr = String(args.new_string ?? "");
+    const replaceAll = args.replace_all === true;
+    if (!filePath) return "Error: path required";
+    if (!oldStr) return "Error: old_string required (cannot be empty)";
+    const resolved = path.resolve(filePath);
+    try {
+      // Read existing content
+      let content: string;
+      try {
+        content = await fs.readFile(resolved, "utf8");
+      } catch {
+        return `Error: file not found at ${resolved}`;
+      }
+      // Count matches
+      const occurrences = content.split(oldStr).length - 1;
+      if (occurrences === 0) {
+        return `Error: old_string not found in ${resolved}. Make sure the text matches EXACTLY (including whitespace and indentation).`;
+      }
+      if (occurrences > 1 && !replaceAll) {
+        return `Error: old_string appears ${occurrences} times in ${resolved}. Either provide more context to make it unique, or set replace_all=true.`;
+      }
+      // Backup
+      const backupDir = path.resolve(process.cwd(), "workspace", ".backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const backupName = `${path.basename(resolved)}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.bak`;
+      const backupPath = path.join(backupDir, backupName);
+      await fs.copyFile(resolved, backupPath);
+      await db.fileBackup.create({
+        data: { originalPath: resolved, backupPath, accepted: false },
+      });
+      // Replace
+      const newContent = replaceAll
+        ? content.split(oldStr).join(newStr)
+        : content.replace(oldStr, newStr);
+      await fs.writeFile(resolved, newContent, "utf8");
+      const replacedCount = replaceAll ? occurrences : 1;
+      return `Edited ${resolved}: replaced ${replacedCount} occurrence${replacedCount > 1 ? "s" : ""} of old_string. Backup: ${backupPath}`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
+  },
+};
+
+// ---------- Append to File ----------
+const appendFile: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "append_file",
+      description:
+        "Append text to the end of a file. Creates the file if it doesn't exist. Use this for adding to log files, appending entries, or building up a file incrementally.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path (absolute or relative)" },
+          content: { type: "string", description: "Content to append" },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  async execute(args) {
+    const filePath = String(args.path || "");
+    const content = String(args.content || "");
+    if (!filePath) return "Error: path required";
+    const resolved = path.resolve(filePath);
+    try {
+      await fs.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.appendFile(resolved, content, "utf8");
+      const stat = await fs.stat(resolved);
+      return `Appended ${content.length} bytes to ${resolved}. File is now ${stat.size} bytes.`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
+  },
+};
+
+// ---------- Create Directory ----------
+const createDirectory: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "create_directory",
+      description:
+        "Create a directory (and any missing parent directories). Use this before writing files to a new location, or to organize files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Directory path to create" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  async execute(args) {
+    const dirPath = String(args.path || "");
+    if (!dirPath) return "Error: path required";
+    const resolved = path.resolve(dirPath);
+    try {
+      await fs.mkdir(resolved, { recursive: true });
+      return `Created directory: ${resolved}`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
+  },
+};
+
+// ---------- Delete File ----------
+// Deletes a file (or empty directory). For non-empty directories, requires
+// recursive=true. Always preserves a backup copy of any deleted file.
+const deleteFile: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "delete_file",
+      description:
+        "Delete a file or directory. For files, creates a backup copy first (stored in workspace/.backups/) so it can be restored. For directories, requires recursive=true. Use with caution — prefer asking the user first for important files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File or directory path to delete" },
+          recursive: {
+            type: "boolean",
+            description: "If true and path is a directory, delete it recursively (including all contents). Required for non-empty directories.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  async execute(args) {
+    const filePath = String(args.path || "");
+    const recursive = args.recursive === true;
+    if (!filePath) return "Error: path required";
+    const resolved = path.resolve(filePath);
+    try {
+      const stat = await fs.stat(resolved);
+      if (stat.isDirectory()) {
+        if (!recursive) {
+          // Check if empty
+          const entries = await fs.readdir(resolved);
+          if (entries.length > 0) {
+            return `Error: directory ${resolved} is not empty. Set recursive=true to delete it and all contents.`;
+          }
+        }
+        await fs.rm(resolved, { recursive });
+        return `Deleted directory: ${resolved}`;
+      }
+      // It's a file — back it up first
+      const backupDir = path.resolve(process.cwd(), "workspace", ".backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const backupName = `${path.basename(resolved)}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.bak`;
+      const backupPath = path.join(backupDir, backupName);
+      await fs.copyFile(resolved, backupPath);
+      await db.fileBackup.create({
+        data: { originalPath: resolved, backupPath, accepted: false },
+      });
+      await fs.unlink(resolved);
+      return `Deleted file: ${resolved}. Backup saved at ${backupPath} (can be restored via restore_file).`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
+  },
+};
+
+// ---------- Move / Rename File ----------
+const moveFile: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "move_file",
+      description:
+        "Move or rename a file. Creates the destination directory if needed. The source must exist; the destination will be overwritten if it exists.",
+      parameters: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Source file path" },
+          destination: { type: "string", description: "Destination file path" },
+        },
+        required: ["source", "destination"],
+      },
+    },
+  },
+  async execute(args) {
+    const src = String(args.source || "");
+    const dst = String(args.destination || "");
+    if (!src || !dst) return "Error: source and destination required";
+    const srcPath = path.resolve(src);
+    const dstPath = path.resolve(dst);
+    try {
+      await fs.mkdir(path.dirname(dstPath), { recursive: true });
+      await fs.rename(srcPath, dstPath);
+      return `Moved ${srcPath} → ${dstPath}`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
+  },
+};
+
+// ---------- Copy File ----------
+const copyFile: ToolExecutor = {
+  definition: {
+    type: "function",
+    function: {
+      name: "copy_file",
+      description:
+        "Copy a file or directory. Creates the destination directory if needed. Source must exist.",
+      parameters: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Source file or directory path" },
+          destination: { type: "string", description: "Destination path" },
+        },
+        required: ["source", "destination"],
+      },
+    },
+  },
+  async execute(args) {
+    const src = String(args.source || "");
+    const dst = String(args.destination || "");
+    if (!src || !dst) return "Error: source and destination required";
+    const srcPath = path.resolve(src);
+    const dstPath = path.resolve(dst);
+    try {
+      await fs.mkdir(path.dirname(dstPath), { recursive: true });
+      await fs.cp(srcPath, dstPath, { recursive: true });
+      const stat = await fs.stat(dstPath);
+      return `Copied ${srcPath} → ${dstPath} (${stat.size} bytes${stat.isDirectory() ? ", directory" : ""})`;
+    } catch (e) {
+      return `Error: ${(e as Error).message}`;
+    }
   },
 };
 
@@ -338,6 +608,12 @@ export const systemTools: Record<string, ToolExecutor> = {
   find_files: findFiles,
   read_system_file: readSystemFile,
   write_system_file: writeSystemFile,
+  edit_file: editFile,
+  append_file: appendFile,
+  create_directory: createDirectory,
+  delete_file: deleteFile,
+  move_file: moveFile,
+  copy_file: copyFile,
   list_pending_changes: listPendingChanges,
   restore_file: restoreFile,
   create_tool: createTool,

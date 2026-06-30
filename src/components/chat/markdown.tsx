@@ -1,3 +1,4 @@
+// src/components/chat/markdown.tsx
 "use client";
 
 import ReactMarkdown from "react-markdown";
@@ -240,21 +241,96 @@ export function Markdown({ content, className }: MarkdownProps) {
           // inside <p> — doing so causes a React hydration error.
           // We use <span> with display:block via Tailwind classes instead.
           // <span> is phrasing content, so it's valid inside <p>.
-          img: ({ src, alt }) => (
-            <span className="my-3 block">
-              <img
-                src={src}
-                alt={alt || ""}
-                className="rounded-lg max-w-full h-auto border border-border/30"
-                loading="lazy"
-              />
-              {alt && (
-                <span className="mt-1.5 block text-xs text-muted-foreground text-center">
-                  {alt}
+          img: ({ src, alt }) => {
+            // --- Special embed syntax ---
+            // The embed_youtube / embed_video / embed_audio / embed_link_preview
+            // tools emit markdown in the form:
+            //   ![video](youtube:ID "title")
+            //   ![video](video:URL "title")
+            //   ![audio](audio:URL "title")
+            //   ![preview](preview:URL "title|desc|imageURL")
+            // We detect the prefix and render the appropriate element.
+            const srcStr = String(src || "");
+            const altStr = String(alt || "");
+
+            if (srcStr.startsWith("youtube:")) {
+              const idAndQuery = srcStr.slice("youtube:".length);
+              // The title attribute (alt) carries the display title.
+              // idAndQuery may include &start=SECONDS for deep-linking.
+              const videoId = idAndQuery.split(/[&?]/)[0];
+              const startMatch = idAndQuery.match(/start=(\d+)/);
+              const start = startMatch ? Number(startMatch[1]) : 0;
+              return (
+                <span className="my-3 block">
+                  <YouTubeEmbed videoId={videoId} title={altStr} start={start} />
+                  {altStr && (
+                    <span className="mt-1.5 block text-xs text-muted-foreground text-center">
+                      {altStr}
+                    </span>
+                  )}
                 </span>
-              )}
-            </span>
-          ),
+              );
+            }
+
+            if (srcStr.startsWith("video:")) {
+              const url = srcStr.slice("video:".length);
+              return (
+                <span className="my-3 block">
+                  <video
+                    src={url}
+                    controls
+                    className="rounded-lg max-w-full h-auto border border-border/30"
+                  />
+                  {altStr && (
+                    <span className="mt-1.5 block text-xs text-muted-foreground text-center">
+                      {altStr}
+                    </span>
+                  )}
+                </span>
+              );
+            }
+
+            if (srcStr.startsWith("audio:")) {
+              const url = srcStr.slice("audio:".length);
+              return (
+                <span className="my-3 block">
+                  <audio src={url} controls className="w-full" />
+                  {altStr && (
+                    <span className="mt-1.5 block text-xs text-muted-foreground text-center">
+                      {altStr}
+                    </span>
+                  )}
+                </span>
+              );
+            }
+
+            if (srcStr.startsWith("preview:")) {
+              const url = srcStr.slice("preview:".length);
+              // alt carries "title|description|imageURL"
+              const parts = altStr.split("|");
+              const title = parts[0]?.trim() || url;
+              const desc = parts[1]?.trim() || "";
+              const image = parts[2]?.trim() || "";
+              return <LinkPreviewCard url={url} title={title} description={desc} image={image} />;
+            }
+
+            // --- Standard image ---
+            return (
+              <span className="my-3 block">
+                <img
+                  src={src}
+                  alt={alt || ""}
+                  className="rounded-lg max-w-full h-auto border border-border/30"
+                  loading="lazy"
+                />
+                {alt && (
+                  <span className="mt-1.5 block text-xs text-muted-foreground text-center">
+                    {alt}
+                  </span>
+                )}
+              </span>
+            );
+          },
           // Code blocks
           code({ className, children, ...props }) {
             const match = /language-(\w+)/.exec(className || "");
@@ -439,5 +515,89 @@ function CodeBlock({
         {value}
       </SyntaxHighlighter>
     </div>
+  );
+}
+
+/**
+ * Responsive YouTube iframe embed.
+ * Uses a 16:9 aspect-ratio wrapper so the player scales fluidly with the
+ * chat column width. Loads lazily and enables the JS API for deep-linking.
+ */
+function YouTubeEmbed({
+  videoId,
+  title,
+  start = 0,
+}: {
+  videoId: string;
+  title: string;
+  start?: number;
+}) {
+  const src = `https://www.youtube-nocookie.com/embed/${videoId}?rel=0${
+    start > 0 ? `&start=${start}` : ""
+  }`;
+  return (
+    <div className="relative w-full overflow-hidden rounded-lg border border-border/30 bg-black" style={{ aspectRatio: "16 / 9" }}>
+      <iframe
+        src={src}
+        title={title || "YouTube video"}
+        loading="lazy"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowFullScreen
+        className="absolute inset-0 h-full w-full"
+      />
+    </div>
+  );
+}
+
+/**
+ * Rich link preview card. Shows an OG image (if any), title, description,
+ * and a clickable link to the URL.
+ */
+function LinkPreviewCard({
+  url,
+  title,
+  description,
+  image,
+}: {
+  url: string;
+  title: string;
+  description: string;
+  image: string;
+}) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="my-3 flex flex-col sm:flex-row overflow-hidden rounded-lg border border-border/40 bg-card hover:bg-foreground/[0.02] transition-colors group"
+    >
+      {image && (
+        <div className="sm:w-40 h-32 sm:h-auto flex-shrink-0 bg-foreground/[0.04] overflow-hidden">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={image}
+            alt={title}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            onError={(e) => {
+              (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+            }}
+          />
+        </div>
+      )}
+      <div className="flex flex-1 flex-col gap-1 p-3 min-w-0">
+        <span className="text-sm font-medium text-foreground line-clamp-2 group-hover:underline">
+          {title}
+        </span>
+        {description && (
+          <span className="text-xs text-muted-foreground line-clamp-2">
+            {description}
+          </span>
+        )}
+        <span className="mt-auto text-[0.7rem] text-muted-foreground/60 truncate">
+          {url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+        </span>
+      </div>
+    </a>
   );
 }

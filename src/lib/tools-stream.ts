@@ -1,3 +1,4 @@
+// src/lib/tools-stream.ts
 // Stream-injectable tools — their markdown output is injected directly into
 // the response stream as a text chunk, so tables/images appear instantly
 // when the tool runs, without waiting for the model to re-generate them.
@@ -16,6 +17,11 @@ import { db } from "./db";
 import path from "node:path";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import {
+  searchWikimediaCommons,
+  searchDuckDuckGoImages,
+  fetchWithUA,
+} from "./search-utils";
 
 // ---------- create_table ----------
 const createTable: ToolExecutor = {
@@ -174,19 +180,27 @@ const embedImage: ToolExecutor = {
 /**
  * Search for an image matching the query.
  *
- * Tries Wikimedia Commons first (public domain / CC images, no hotlink
- * protection, reliable direct URLs) then falls back to DuckDuckGo image
- * search. Returns a direct image URL that can be downloaded.
+ * Tries multiple sources in parallel for robustness:
+ *   1. Wikimedia Commons — public domain / CC images (most reliable)
+ *   2. DuckDuckGo image search — broader coverage, less reliable
+ * Returns the first usable direct image URL.
  */
 async function searchForImage(query: string): Promise<string | null> {
-  // --- Source 1: Wikimedia Commons (most reliable) ---
-  const wikiUrl = await searchWikimediaCommons(query);
-  if (wikiUrl) return wikiUrl;
-
-  // --- Source 2: DuckDuckGo image search (fallback) ---
-  const ddgUrl = await searchDuckDuckGoImages(query);
-  if (ddgUrl) return ddgUrl;
-
+  // Fire both in parallel and take whichever returns first with a usable URL.
+  const [wiki, ddg] = await Promise.all([
+    searchWikimediaCommons(query, 5),
+    searchDuckDuckGoImages(query, 5),
+  ]);
+  // Prefer Wikimedia (more reliable direct URLs, no hotlink protection)
+  if (wiki.length > 0 && wiki[0].url) return wiki[0].url;
+  if (ddg.length > 0 && ddg[0].url) return ddg[0].url;
+  // Try second-choice Wikimedia results if DDG returned nothing useful
+  for (const r of wiki) {
+    if (r.url) return r.url;
+  }
+  for (const r of ddg) {
+    if (r.url) return r.url;
+  }
   return null;
 }
 
@@ -194,96 +208,31 @@ async function searchForImage(query: string): Promise<string | null> {
  * Search Wikimedia Commons for an image. Returns a direct image URL.
  * Wikimedia Commons images are public domain or Creative Commons licensed
  * and can be freely downloaded and served.
+ *
+ * NOTE: This is a thin wrapper around the shared helper for backwards
+ * compatibility. New code should import searchWikimediaCommons directly.
  */
-async function searchWikimediaCommons(query: string): Promise<string | null> {
-  try {
-    // Use the generator=search with namespace 6 (File:) to find image files
-    const apiUrl =
-      `https://commons.wikimedia.org/w/api.php?action=query&format=json` +
-      `&generator=search&gsrsearch=${encodeURIComponent(query)}` +
-      `&gsrnamespace=6&gsrlimit=5&prop=imageinfo` +
-      `&iiprop=url|mime|size&iiurlwidth=800`;
-
-    const resp = await fetch(apiUrl, {
-      headers: {
-        "User-Agent":
-          "LocalAIChatBot/1.0 (https://example.com; contact@example.com)",
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!resp.ok) return null;
-
-    const data = await resp.json();
-    const pages = data?.query?.pages;
-    if (!pages) return null;
-
-    // Iterate pages, find the first one with a valid image URL
-    for (const page of Object.values<any>(pages)) {
-      const info = page.imageinfo?.[0];
-      if (!info) continue;
-      // Prefer the thumburl (resized) over the full url (can be huge)
-      const url = info.thumburl || info.url;
-      if (url && (info.mime?.startsWith("image/") || url.match(/\.(jpg|jpeg|png|gif|webp)/i))) {
-        return url;
-      }
-    }
-    return null;
-  } catch {
-    return null;
+async function searchWikimediaCommonsLegacy(query: string): Promise<string | null> {
+  const results = await searchWikimediaCommons(query, 5);
+  for (const r of results) {
+    if (r.url) return r.url;
   }
+  return null;
 }
 
 /**
  * Search DuckDuckGo for images. Less reliable than Wikimedia (hotlink
  * protection, redirects) but covers a broader range of topics.
+ *
+ * NOTE: This is a thin wrapper around the shared helper for backwards
+ * compatibility.
  */
-async function searchDuckDuckGoImages(query: string): Promise<string | null> {
-  try {
-    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`;
-    const resp = await fetch(searchUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-      },
-      redirect: "follow",
-    });
-    if (!resp.ok) return null;
-    const html = await resp.text();
-
-    // Pattern 1: vqd-based image API (more reliable)
-    const vqdMatch = html.match(/vqd=['"](\d+-\d+(?:-\d+)?)['"]/);
-    if (vqdMatch) {
-      const vqd = vqdMatch[1];
-      const apiUrl = `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(query)}&vqd=${vqd}&f=,,,,,&p=1`;
-      const apiResp = await fetch(apiUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-          "Referer": "https://duckduckgo.com/",
-        },
-      });
-      if (apiResp.ok) {
-        const data = await apiResp.json();
-        if (data.results && data.results.length > 0) {
-          return data.results[0].image || data.results[0].thumbnail || null;
-        }
-      }
-    }
-
-    // Pattern 2: scrape image URLs from the HTML directly
-    const imgMatches = html.match(/https?:\/\/[^"'\s]+\.(?:jpg|jpeg|png|gif|webp)/gi);
-    if (imgMatches && imgMatches.length > 0) {
-      const filtered = imgMatches.filter(
-        (u) => !u.includes("favicon") && !u.includes("logo") && !u.includes("icon")
-      );
-      if (filtered.length > 0) return filtered[0];
-      return imgMatches[0];
-    }
-
-    return null;
-  } catch {
-    return null;
+async function searchDuckDuckGoImagesLegacy(query: string): Promise<string | null> {
+  const results = await searchDuckDuckGoImages(query, 5);
+  for (const r of results) {
+    if (r.url) return r.url;
   }
+  return null;
 }
 
 /**
@@ -296,16 +245,10 @@ async function searchDuckDuckGoImages(query: string): Promise<string | null> {
  */
 async function downloadAndStoreImage(imageUrl: string): Promise<string | null> {
   try {
-    const resp = await fetch(imageUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        // Some image servers require an Accept header
-        "Accept": "image/*,*/*;q=0.8",
-      },
+    const resp = await fetchWithUA(imageUrl, {
       redirect: "follow",
-      signal: AbortSignal.timeout(20000),
-    });
+      headers: { Accept: "image/*,*/*;q=0.8" },
+    }, { timeoutMs: 20000 });
     if (!resp.ok) return null;
 
     // Determine content type — fall back to URL extension if header missing
@@ -316,7 +259,39 @@ async function downloadAndStoreImage(imageUrl: string): Promise<string | null> {
       else if (imageUrl.match(/\.png(\?|$)/i)) contentType = "image/png";
       else if (imageUrl.match(/\.gif(\?|$)/i)) contentType = "image/gif";
       else if (imageUrl.match(/\.webp(\?|$)/i)) contentType = "image/webp";
-      else return null; // Not an image
+      else {
+        // Last resort: sniff magic bytes
+        const buf = Buffer.from(await resp.arrayBuffer());
+        if (buf.length < 12) return null;
+        if (buf[0] === 0xff && buf[1] === 0xd8) contentType = "image/jpeg";
+        else if (buf[0] === 0x89 && buf[1] === 0x50) contentType = "image/png";
+        else if (buf.slice(0, 6).toString() === "GIF87a" || buf.slice(0, 6).toString() === "GIF89a") contentType = "image/gif";
+        else if (buf[0] === 0x42 && buf[1] === 0x4d) contentType = "image/bmp";
+        else return null;
+        // We already consumed the buffer — re-create it
+        const id = crypto.randomUUID();
+        const ext = contentType.includes("png") ? "png"
+          : contentType.includes("gif") ? "gif"
+          : contentType.includes("webp") ? "webp"
+          : contentType.includes("bmp") ? "bmp"
+          : "jpg";
+        const filename = `${id}.${ext}`;
+        const storagePath = path.resolve(process.cwd(), "uploads", filename);
+        await fs.mkdir(path.dirname(storagePath), { recursive: true });
+        await fs.writeFile(storagePath, buf);
+        await db.uploadedFile.create({
+          data: {
+            id,
+            filename: `web-image.${ext}`,
+            mimeType: contentType,
+            size: buf.length,
+            storagePath,
+            extractedText: `Image from web: ${imageUrl}`,
+            extracted: true,
+          },
+        });
+        return id;
+      }
     }
 
     const buffer = Buffer.from(await resp.arrayBuffer());
@@ -327,6 +302,7 @@ async function downloadAndStoreImage(imageUrl: string): Promise<string | null> {
     const ext = contentType.includes("png") ? "png"
       : contentType.includes("gif") ? "gif"
       : contentType.includes("webp") ? "webp"
+      : contentType.includes("bmp") ? "bmp"
       : "jpg";
 
     const imageId = crypto.randomUUID();
@@ -431,10 +407,17 @@ const generateImage: ToolExecutor = {
 
 // Set of tool names whose result content should be auto-injected into the
 // response stream as a text chunk. The agent loop checks this set.
+// IMPORTANT: the embed_youtube / embed_video / embed_audio / embed_link_preview
+// tools live in tools-embed.ts and are also registered here so the agent loop
+// treats their markdown output as stream-injectable.
 export const STREAM_INJECT_TOOLS = new Set<string>([
   "create_table",
   "embed_image",
   "generate_image",
+  "embed_youtube",
+  "embed_video",
+  "embed_audio",
+  "embed_link_preview",
 ]);
 
 export const streamTools: Record<string, ToolExecutor> = {
