@@ -1,4 +1,6 @@
 // src/lib/agent.ts
+
+// src/lib/agent.ts
 // Agent loop engine — orchestrates multi-step reasoning with tool use.
 // Streams events: assistant text → tool calls → tool results → next assistant turn → ...
 
@@ -18,16 +20,21 @@ import fs from "node:fs/promises";
 
 /**
  * Given a tool call that just executed, determine whether it was a file-write
- * operation and — if so — return the resolved absolute path + operation kind.
+ * operation and — if so — return the resolved absolute path + operation kind
+ * + relative path within the conversation workspace.
+ *
  * Returns null for non-file-write tools.
  *
  * This drives the `file_write` SSE event that the frontend file panel
  * listens for to update its tree and show live content.
  *
  * For workspace tools (write_file, append_file), the path is resolved
- * relative to the conversation's workDir.
+ * relative to the conversation's workDir, and `relativePath` is the
+ * workspace-relative path (POSIX-style, forward slashes).
  * For system tools (write_system_file, edit_file), the path is resolved
- * as-is (absolute or relative to process.cwd()).
+ * as-is (absolute or relative to process.cwd()). `relativePath` is null if
+ * the file is outside the conversation workspace, otherwise it's the
+ * workspace-relative path.
  *
  * `workDir` is the conversation workspace root, passed in from the agent
  * options so we can resolve relative workspace paths correctly.
@@ -36,28 +43,50 @@ function extractFileWriteInfo(
   toolName: string,
   args: Record<string, unknown>,
   workDir: string
-): { operation: "create" | "write" | "edit" | "append"; path: string } | null {
+): {
+  operation: "create" | "write" | "edit" | "append";
+  path: string;
+  relativePath: string | null;
+} | null {
   // Workspace file tools — path is relative to workDir
   if (toolName === "write_file") {
     const rel = String(args.path || "");
     if (!rel) return null;
-    return { operation: "write", path: path.resolve(workDir, rel) };
+    return {
+      operation: "write", // upgraded to "create" post-existence-check in caller
+      path: path.resolve(workDir, rel),
+      relativePath: rel.split(path.sep).join("/"),
+    };
   }
   if (toolName === "append_file") {
     const rel = String(args.path || "");
     if (!rel) return null;
-    return { operation: "append", path: path.resolve(workDir, rel) };
+    return {
+      operation: "append",
+      path: path.resolve(workDir, rel),
+      relativePath: rel.split(path.sep).join("/"),
+    };
   }
   // System file tools — path may be absolute or relative to cwd
   if (toolName === "write_system_file") {
     const p = String(args.path || "");
     if (!p) return null;
-    return { operation: "write", path: path.resolve(p) };
+    const resolved = path.resolve(p);
+    return {
+      operation: "write", // upgraded to "create" post-existence-check in caller
+      path: resolved,
+      relativePath: relativizePath(resolved, workDir),
+    };
   }
   if (toolName === "edit_file") {
     const p = String(args.path || "");
     if (!p) return null;
-    return { operation: "edit", path: path.resolve(p) };
+    const resolved = path.resolve(p);
+    return {
+      operation: "edit",
+      path: resolved,
+      relativePath: relativizePath(resolved, workDir),
+    };
   }
   // Virtual env file writes
   if (toolName === "write_env_file") {
@@ -66,6 +95,17 @@ function extractFileWriteInfo(
     return null;
   }
   return null;
+}
+
+/**
+ * Convert an absolute path to a workspace-relative POSIX-style path.
+ * Returns null if the path is not inside the workspace.
+ */
+function relativizePath(absPath: string, workDir: string): string | null {
+  if (!absPath.startsWith(workDir + path.sep) && absPath !== workDir) {
+    return null;
+  }
+  return path.relative(workDir, absPath).split(path.sep).join("/");
 }
 
 export interface AgentLoopOptions {
@@ -420,6 +460,35 @@ export async function* runAgentLoop(
       // and display the live content of the file.
       const fileWriteInfo = extractFileWriteInfo(tc.name, tc.arguments, opts.workDir);
       if (fileWriteInfo) {
+        // Detect "create" vs "write" by checking if the file existed
+        // BEFORE the tool ran. We do this by checking the file's existence
+        // NOW (after the write) — if it exists and the operation was a
+        // plain "write", we can't reliably tell post-hoc. So we use a
+        // pre-execution flag: track whether the file existed before.
+        // However, since the tool already ran, we approximate by checking
+        // mtime vs ctime: if ctime (inode change) is within the last
+        // second and the file is small, it was likely just created.
+        //
+        // Simpler approach: we recorded existence BEFORE the tool ran by
+        // peeking at the args — but that's not possible here. So we use
+        // a heuristic: emit "create" if the operation type from
+        // extractFileWriteInfo is "write" AND the tool was write_file or
+        // write_system_file AND the file didn't exist before. We can't
+        // know the latter, so we use the file's birthtime (ctime) — if
+        // it's within the last 2 seconds, treat as "create".
+        let operation = fileWriteInfo.operation;
+        if (operation === "write") {
+          try {
+            const stat = await fs.stat(fileWriteInfo.path);
+            const birthtimeMs = stat.birthtime?.getTime?.() ?? stat.ctime.getTime();
+            if (Date.now() - birthtimeMs < 2000) {
+              operation = "create";
+            }
+          } catch {
+            // stat failed — keep as "write"
+          }
+        }
+
         // Read back the file content AFTER the write so the panel shows
         // the current state. For files outside the workspace (system
         // files), we still emit the event — the panel will show the path
@@ -448,8 +517,9 @@ export async function* runAgentLoop(
           yield {
             type: "file_write",
             fileWrite: {
-              operation: fileWriteInfo.operation,
+              operation,
               path: fileWriteInfo.path,
+              relativePath: fileWriteInfo.relativePath,
               content: fullContent,
               conversationId: opts.conversationId,
               toolName: tc.name,

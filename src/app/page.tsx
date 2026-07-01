@@ -1,4 +1,6 @@
 // src/app/page.tsx
+
+// src/app/page.tsx
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -296,7 +298,7 @@ export default function Home() {
             body: JSON.stringify({ title: "New chat" }),
           });
           const data = await resp.json();
-          convId = data.conversation.id;
+          convId = data.conversation.id as string;
           upsertConversation({
             id: convId,
             title: data.conversation.title,
@@ -315,7 +317,8 @@ export default function Home() {
         }
       }
 
-      const conversationId = convId;
+      // convId is guaranteed non-null here (we returned early on failure above)
+      const conversationId = convId as string;
 
       // Add user message locally + persist (with attachment IDs)
       const userMsg: ChatMessage = {

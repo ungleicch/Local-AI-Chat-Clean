@@ -1,3 +1,5 @@
+// src/lib/model-fetcher.ts
+
 // Dynamic model fetching with 24h cache and capability detection
 import { db } from "./db";
 
@@ -303,7 +305,7 @@ export async function refreshAllProviderModels(): Promise<{
   results: Array<{ providerId: string; providerName: string; modelCount: number; fromCache: boolean; error?: string }>;
 }> {
   const providers = await db.provider.findMany({ where: { enabled: true } });
-  const results = [];
+  const results: Array<{ providerId: string; providerName: string; modelCount: number; fromCache: boolean; error?: string }> = [];
   let refreshed = 0;
 
   for (const p of providers) {

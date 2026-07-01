@@ -1,7 +1,11 @@
 // src/app/api/conversations/[id]/route.ts
 
+// src/app/api/conversations/[id]/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import path from "node:path";
+import fs from "node:fs/promises";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,15 +49,23 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const body = await req.json();
+  // Only update fields that are explicitly provided in the body. This
+  // prevents accidentally clearing out fields like `title` when the client
+  // only wants to update `pinned`, or vice versa.
+  const data: Record<string, unknown> = {};
+  if (typeof body.title === "string") data.title = body.title || "Untitled";
+  if (typeof body.providerId === "string") data.providerId = body.providerId;
+  if (typeof body.modelId === "string") data.modelId = body.modelId;
+  if (typeof body.systemPrompt === "string") data.systemPrompt = body.systemPrompt;
+  if (typeof body.pinned === "boolean") data.pinned = body.pinned;
+
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+  }
+
   const updated = await db.conversation.update({
     where: { id },
-    data: {
-      title: body.title,
-      providerId: body.providerId,
-      modelId: body.modelId,
-      systemPrompt: body.systemPrompt,
-      pinned: body.pinned,
-    },
+    data,
   });
   return NextResponse.json({
     conversation: {
@@ -69,6 +81,30 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  await db.conversation.delete({ where: { id } });
+
+  // Clean up the conversation's workspace directory on disk.
+  // We do this BEFORE deleting the DB record so that even if the DB delete
+  // fails, we don't leave orphaned files. If the DB delete fails, the user
+  // can retry — the workspace is already gone but that's fine because
+  // the conversation's messages (which reference the files) will be gone
+  // once the DB delete succeeds.
+  try {
+    const workDir = path.resolve(process.cwd(), "workspace", id);
+    // Defensive: verify the resolved path is inside the workspace root
+    // to prevent accidental deletion of unrelated directories.
+    const workspaceRoot = path.resolve(process.cwd(), "workspace");
+    if (workDir.startsWith(workspaceRoot + path.sep) || workDir === workspaceRoot) {
+      await fs.rm(workDir, { recursive: true, force: true });
+    }
+  } catch {
+    // Best-effort cleanup — don't fail the delete if cleanup fails.
+  }
+
+  try {
+    await db.conversation.delete({ where: { id } });
+  } catch (e) {
+    // If conversation doesn't exist, still return ok (idempotent delete)
+    return NextResponse.json({ ok: true });
+  }
   return NextResponse.json({ ok: true });
 }

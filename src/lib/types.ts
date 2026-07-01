@@ -1,4 +1,6 @@
 // src/lib/types.ts
+
+// src/lib/types.ts
 // Core type definitions for the chat platform
 
 export type Role = "user" | "assistant" | "system" | "tool";
@@ -111,10 +113,15 @@ export interface StreamChunk {
  * file panel listens for these events to update its file tree and show the
  * live content of the file being written.
  *
- * `path` is the workspace-relative path (or absolute system path for
- * write_system_file / edit_file on system files). `content` is the full
- * file content AFTER the write (so the panel can display the current state).
- * For edit_file, this is the full file content after the edit was applied.
+ * - `path` is the absolute path the tool wrote to (kept for debugging).
+ * - `relativePath` is the path relative to the conversation workspace root
+ *   (POSIX-style, forward slashes). Used by the frontend to select the file
+ *   in the tree without parsing the absolute path. May be null for system
+ *   file writes that happen outside the workspace (write_system_file,
+ *   edit_file on absolute paths).
+ * - `content` is the full file content AFTER the write (so the panel can
+ *   display the current state). For edit_file, this is the full file content
+ *   after the edit was applied.
  *
  * `operation` indicates what kind of write happened:
  *   - "create"  : a new file was created (write_file / write_system_file to a
@@ -125,10 +132,11 @@ export interface StreamChunk {
  */
 export interface FileWriteEvent {
   operation: "create" | "write" | "edit" | "append";
-  path: string;         // the path the tool wrote to
-  content: string;      // full file content after the write
+  path: string;                  // absolute path the tool wrote to
+  relativePath: string | null;   // path relative to workspace root (null for system files outside workspace)
+  content: string;               // full file content after the write
   conversationId: string;
-  toolName: string;     // which tool did the writing
+  toolName: string;              // which tool did the writing
   timestamp: string;
 }
 

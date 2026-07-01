@@ -1,3 +1,5 @@
+// src/app/api/upload/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import path from "node:path";
@@ -17,7 +19,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No files provided" }, { status: 400 });
   }
 
-  const uploaded = [];
+  const uploaded: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+  }> = [];
   for (const file of files) {
     if (!(file instanceof File)) continue;
     const id = crypto.randomUUID();

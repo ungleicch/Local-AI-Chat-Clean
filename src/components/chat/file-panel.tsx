@@ -1,4 +1,6 @@
 // src/components/chat/file-panel.tsx
+
+// src/components/chat/file-panel.tsx
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -319,15 +321,23 @@ export function FilePanel({
     lastProcessedEventIdx.current = fileWriteEvents.length - 1;
 
     const latest = newEvents[newEvents.length - 1];
-    // The path in the event is absolute (resolved server-side). We need
-    // to convert it to a workspace-relative path for display + selection.
-    let displayPath = latest.path;
-    // Try to make it relative to the workspace root
-    // (we don't know the exact workspace root on the client, but we can
-    // heuristically strip everything up to and including the conversationId)
-    const convIdIdx = displayPath.indexOf(conversationId || "");
-    if (convIdIdx >= 0) {
-      displayPath = displayPath.slice(convIdIdx + (conversationId || "").length + 1);
+    // Prefer the workspace-relative path (sent by the agent loop). Fall back
+    // to the absolute path if relativePath is null (e.g. system file writes
+    // outside the workspace). For absolute paths, try to relativize against
+    // the conversationId in the path (legacy fallback).
+    let displayPath = latest.relativePath;
+    if (!displayPath) {
+      // Legacy fallback: try to slice off everything up to and including the
+      // conversationId segment from the absolute path.
+      const absPath = latest.path;
+      const convId = conversationId || "";
+      const convIdIdx = convId ? absPath.indexOf(convId) : -1;
+      if (convIdIdx >= 0) {
+        displayPath = absPath.slice(convIdIdx + convId.length + 1);
+      } else {
+        // System file outside the workspace — show the absolute path as-is.
+        displayPath = absPath;
+      }
     }
 
     // Show a brief write indicator
@@ -420,6 +430,8 @@ export function FilePanel({
                 <Plus className="h-3 w-3 text-green-500 flex-shrink-0" />
               ) : writeIndicator.operation === "edit" ? (
                 <Edit3 className="h-3 w-3 text-blue-500 flex-shrink-0" />
+              ) : writeIndicator.operation === "append" ? (
+                <Upload className="h-3 w-3 text-amber-500 flex-shrink-0" />
               ) : (
                 <Upload className="h-3 w-3 text-amber-500 flex-shrink-0" />
               )}
@@ -428,6 +440,8 @@ export function FilePanel({
                   ? "Created"
                   : writeIndicator.operation === "edit"
                   ? "Edited"
+                  : writeIndicator.operation === "append"
+                  ? "Appended"
                   : "Updated"}{" "}
                 <span className="font-mono">{writeIndicator.path}</span>
               </span>

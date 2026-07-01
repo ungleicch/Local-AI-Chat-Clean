@@ -1,4 +1,6 @@
 // src/lib/tools.ts
+
+// src/lib/tools.ts
 // Tool registry — defines all tools the agent can call.
 // Each tool: name, description, JSON schema, executor.
 
@@ -266,7 +268,7 @@ const codeExec: ToolExecutor = {
     };
     try {
       const context = vm.createContext(sandbox);
-      const script = new vm.Script(code, { timeout: 5000 });
+      const script = new vm.Script(code);
       const result = script.runInContext(context, { timeout: 5000 });
       let out = logs.join("\n");
       if (result !== undefined) {

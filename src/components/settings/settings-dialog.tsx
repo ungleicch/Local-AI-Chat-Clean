@@ -1,3 +1,5 @@
+// src/components/settings/settings-dialog.tsx
+
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
@@ -38,6 +40,7 @@ import {
   AlertCircle,
   Check,
   FileText,
+  RotateCcw,
 } from "lucide-react";
 import type { ProviderConfig, ModelConfig, ProviderType } from "@/lib/types";
 import { useSettings } from "@/lib/stores/settings";
@@ -677,20 +680,39 @@ function FilesTab() {
   const acceptAll = async () => {
     try {
       await fetch("/api/changes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-      toast({ title: "All changes accepted" });
+      toast({ title: "All changes accepted (files kept as-is)" });
       load();
     } catch (e) {
       toast({ title: "Failed", description: (e as Error).message, variant: "destructive" });
     }
   };
 
-  const restore = async (id: string) => {
+  const acceptOne = async (id: string) => {
     try {
       await fetch("/api/changes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
       toast({ title: "Change accepted (file kept)" });
       load();
     } catch (e) {
       toast({ title: "Failed", description: (e as Error).message, variant: "destructive" });
+    }
+  };
+
+  const restoreOne = async (id: string) => {
+    try {
+      const resp = await fetch("/api/changes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, restore: true }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        toast({ title: "File restored from backup" });
+      } else {
+        toast({ title: "Restore failed", description: data.error || "Unknown error", variant: "destructive" });
+      }
+      load();
+    } catch (e) {
+      toast({ title: "Restore failed", description: (e as Error).message, variant: "destructive" });
     }
   };
 
@@ -702,7 +724,7 @@ function FilesTab() {
             <AlertCircle className="h-4 w-4" /> Pending File Changes
           </Label>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Files the agent has modified. Each has a backup. Accept to keep, or restore to undo.
+            Files the agent has modified. Each has a backup. <b>Accept</b> to keep the new version, or <b>Restore</b> to undo.
           </p>
         </div>
         {changes.length > 0 && (
@@ -726,8 +748,11 @@ function FilesTab() {
                   Changed {new Date(c.createdAt).toLocaleString()}
                 </div>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => restore(c.id)} className="h-6 text-xs">
+              <Button size="sm" variant="ghost" onClick={() => acceptOne(c.id)} className="h-6 text-xs" title="Keep the new version">
                 Accept
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => restoreOne(c.id)} className="h-6 text-xs" title="Restore the original from backup">
+                <RotateCcw className="h-3 w-3 mr-1" /> Restore
               </Button>
             </div>
           ))}
